@@ -28,9 +28,36 @@ interface Place {
 }
 
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
-const EMAIL_REGEX = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-const OBFUSCATED_EMAIL_REGEX = /([\w.+-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|at|AT|ät))\s*([A-Za-z0-9.-]+)\.([A-Za-z]{2,})/gi;
+const EMAIL_REGEX = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
+const OBFUSCATED_EMAIL_REGEX = /([\w.+\-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|at|AT|ät))\s*([A-Za-z0-9.\-]+)\.([A-Za-z]{2,})/gi;
 const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net'];
+
+// Clean email by removing leading numbers and ensure it starts with a letter
+function cleanEmail(email: string): string | null {
+  // Remove leading numbers until we hit a letter
+  const cleaned = email.replace(/^[0-9]+/, '');
+  // Check if it starts with a letter now
+  if (cleaned && /^[A-Za-z]/.test(cleaned)) {
+    return cleaned;
+  }
+  return null;
+}
+
+function getDomainWithoutTLD(fullDomain: string): string {
+  const normalized = fullDomain.replace(/^www\./, '');
+  const parts = normalized.split('.');
+  return parts.length > 1 ? parts.slice(0, -1).join('.') : normalized;
+}
+
+function isEmailFromDomain(email: string, expectedDomain: string): boolean {
+  const emailDomain = email.split('@')[1]?.toLowerCase();
+  if (!emailDomain) return false;
+  
+  const emailDomainWithoutTLD = getDomainWithoutTLD(emailDomain);
+  const domainWithoutTLD = getDomainWithoutTLD(expectedDomain);
+  
+  return emailDomainWithoutTLD === domainWithoutTLD || COMMON_PROVIDERS.includes(emailDomain);
+}
 
 export async function POST(request: NextRequest) {
   console.log('🚀 Scraping request started');
@@ -74,7 +101,20 @@ export async function POST(request: NextRequest) {
       console.log(`📊 Excel file parsed: ${data.length} rows found`);
 
       const results: BusinessResult[] = [];
-      const browser = await chromium.launch({ headless: true });
+      const browser = await chromium.launch({ 
+        headless: true,
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--no-sandbox',
+          '--disable-dev-shm-usage'
+        ]
+      });
+      const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+        locale: 'de-DE',
+        timezoneId: 'Europe/Berlin',
+      });
       console.log('🌐 Browser launched');
 
       let processedBusinesses = 0;
@@ -135,7 +175,7 @@ export async function POST(request: NextRequest) {
             });
             
             status = 'searching';
-            email = await findEmail(browser, place.website);
+            email = await findEmail(context, place.website);
             status = email ? 'success' : 'no_email';
             if (email) {
               console.log(`✉️  Email found: ${email}`);
@@ -168,6 +208,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      await context.close();
       await browser.close();
       console.log(`🎉 Scraping completed successfully. Total results: ${results.length}`);
 
@@ -254,12 +295,12 @@ async function searchPlaces(stadt: string, branche: string): Promise<Place[]> {
   return allPlaces;
 }
 
-async function findEmail(browser: any, websiteUrl: string): Promise<string | null> {
+async function findEmail(context: any, websiteUrl: string): Promise<string | null> {
   console.log(`🕷️  Starting email search for: ${websiteUrl}`);
-  const page = await browser.newPage();
+  const page = await context.newPage();
   const visited = new Set<string>();
   const baseUrl = new URL(websiteUrl);
-  const domain = baseUrl.hostname;
+  const domain = baseUrl.hostname.replace(/^www\./, '');
 
   try {
     // Suche auf der Hauptseite
@@ -292,7 +333,7 @@ async function findEmail(browser: any, websiteUrl: string): Promise<string | nul
         if (!link) return false;
         try {
           const url = new URL(link);
-          return url.hostname === domain && !visited.has(link);
+          return url.hostname.replace(/^www\./, '') === domain && !visited.has(link);
         } catch {
           return false;
         }
@@ -324,6 +365,33 @@ async function searchPageForEmail(page: any, url: string, domain: string): Promi
   try {
     console.log(`   📲 Loading: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    
+    // 1. Zuerst nach mailto: Links in der HTML-Struktur suchen
+    console.log(`   🔍 Checking mailto: links...`);
+    const mailtoLinks = await page.$$eval('a[href^="mailto:"]', (anchors: HTMLAnchorElement[]) =>
+      anchors.map((a: HTMLAnchorElement) => {
+        const href = a.getAttribute('href') || '';
+        return href.replace('mailto:', '').split('?')[0].trim();
+      })
+    );
+    
+    if (mailtoLinks.length > 0) {
+      console.log(`   📧 Found ${mailtoLinks.length} mailto: links: ${mailtoLinks.join(', ')}`);
+      for (const email of mailtoLinks) {
+        if (email && email.includes('@')) {
+          const cleaned = cleanEmail(email);
+          if (cleaned && isEmailFromDomain(cleaned, domain)) {
+            console.log(`   ✅ Valid mailto: email found: ${cleaned}`);
+            return cleaned;
+          } else {
+            console.log(`   ⛔ Mailto link rejected: ${cleaned} (domain mismatch)`);
+          }
+        }
+      }
+    }
+    
+    // 2. Fallback: Text-basierte Suche
+    console.log(`   🔍 Fallback: Checking text content...`);
     const text = await page.textContent('body');
     
     if (!text) {
@@ -334,7 +402,7 @@ async function searchPageForEmail(page: any, url: string, domain: string): Promi
     const directEmails = text?.match(EMAIL_REGEX) || [];
     console.log(`   📧 Direct emails found: ${directEmails.length}`);
     if (directEmails.length > 0) {
-      console.log(`      Found: ${directEmails.join(', ')}`);
+      console.log(`      Raw: ${directEmails.join(', ')}`);
     }
 
     // Also catch obfuscated forms like "info at domain.de"
@@ -349,18 +417,18 @@ async function searchPageForEmail(page: any, url: string, domain: string): Promi
     
     console.log(`   🔐 Obfuscated emails found: ${obfuscatedEmails.length}`);
     if (obfuscatedEmails.length > 0) {
-      console.log(`      Found: ${obfuscatedEmails.join(', ')}`);
+      console.log(`      Raw: ${obfuscatedEmails.join(', ')}`);
     }
 
-    const emails = [...directEmails, ...obfuscatedEmails];
+    // Clean emails: remove leading numbers
+    const allRawEmails = [...directEmails, ...obfuscatedEmails];
+    const emails = allRawEmails
+      .map(email => cleanEmail(email))
+      .filter((email): email is string => email !== null);
     
-    // Extract domain name without TLD for comparison
-    const getDomainWithoutTLD = (fullDomain: string): string => {
-      const normalized = fullDomain.replace(/^www\./, '');
-      const parts = normalized.split('.');
-      // Remove TLD (last part) if there are at least 2 parts
-      return parts.length > 1 ? parts.slice(0, -1).join('.') : normalized;
-    };
+    if (emails.length !== allRawEmails.length) {
+      console.log(`   🧹 Cleaned emails: ${emails.join(', ')}`);
+    }
     
     const domainWithoutTLD = getDomainWithoutTLD(domain);
     console.log(`   🔍 Validating against domain: ${domain} (base: ${domainWithoutTLD})`);
