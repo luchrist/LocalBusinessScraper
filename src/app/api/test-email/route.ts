@@ -3,7 +3,7 @@ import { chromium } from 'playwright';
 
 const EMAIL_REGEX = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
 const OBFUSCATED_EMAIL_REGEX = /([\w.+\-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|at|AT|ät))\s*([A-Za-z0-9.\-]+)\.([A-Za-z]{2,})/gi;
-const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net'];
+const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net', 'aol.com'];
 
 function cleanEmail(email: string): string | null {
   const cleaned = email.replace(/^[0-9]+/, '');
@@ -11,6 +11,50 @@ function cleanEmail(email: string): string | null {
     return cleaned;
   }
   return null;
+}
+
+function getDomainWithoutTLD(fullDomain: string): string {
+  const normalized = fullDomain.replace(/^www\./, '');
+  const parts = normalized.split('.');
+  return parts.length > 1 ? parts.slice(0, -1).join('.') : normalized;
+}
+
+function normalizeDomain(domain: string): string {
+  return domain.toLowerCase()
+    .replace(/ä/g, 'ae')
+    .replace(/ö/g, 'oe')
+    .replace(/ü/g, 'ue')
+    .replace(/ß/g, 'ss')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function isEmailFromDomain(email: string, expectedDomain: string, strictMode: boolean = true): boolean {
+  const emailDomain = email.split('@')[1]?.toLowerCase();
+  if (!emailDomain) return false;
+  
+  // Common providers always OK
+  if (COMMON_PROVIDERS.includes(emailDomain)) return true;
+  
+  const emailDomainWithoutTLD = getDomainWithoutTLD(emailDomain);
+  const domainWithoutTLD = getDomainWithoutTLD(expectedDomain);
+  
+  // Exact match
+  if (emailDomainWithoutTLD === domainWithoutTLD) return true;
+  
+  // Fuzzy match (if not strict)
+  if (!strictMode) {
+    const normalizedEmail = normalizeDomain(emailDomainWithoutTLD);
+    const normalizedExpected = normalizeDomain(domainWithoutTLD);
+    
+    // Check if one contains the other (min 8 chars to avoid false positives)
+    if (normalizedEmail.length >= 8 && normalizedExpected.length >= 8) {
+      if (normalizedEmail.includes(normalizedExpected) || normalizedExpected.includes(normalizedEmail)) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
 }
 
 export async function POST(request: NextRequest) {
@@ -64,12 +108,12 @@ async function findEmail(context: any, websiteUrl: string, log: (msg: string) =>
   const page = await context.newPage();
   const visited = new Set<string>();
   const baseUrl = new URL(websiteUrl);
-  const domain = baseUrl.hostname;
+  const domain = baseUrl.hostname.replace(/^www\./, '');
 
   try {
     // Suche auf der Hauptseite
     log(`🔎 Scanning main page...`);
-    const email = await searchPageForEmail(page, websiteUrl, domain, log);
+    const email = await searchPageForEmail(page, websiteUrl, domain, true, log);
     if (email) {
       log(`✅ Email found on main page: ${email}`);
       return email;
@@ -124,7 +168,7 @@ async function findEmail(context: any, websiteUrl: string, log: (msg: string) =>
     for (const link of subpages) {
       visited.add(link);
       log(`\n   🔍 Checking: ${link}`);
-      const email = await searchPageForEmail(page, link, domain, log);
+      const email = await searchPageForEmail(page, link, domain, false, log);
       if (email) {
         log(`✅ Email found on subpage: ${email}`);
         return email;
@@ -141,7 +185,7 @@ async function findEmail(context: any, websiteUrl: string, log: (msg: string) =>
   return null;
 }
 
-async function searchPageForEmail(page: any, url: string, domain: string, log: (msg: string) => void): Promise<string | null> {
+async function searchPageForEmail(page: any, url: string, domain: string, isMainPage: boolean, log: (msg: string) => void): Promise<string | null> {
   try {
     log(`   📲 Loading: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
@@ -158,27 +202,25 @@ async function searchPageForEmail(page: any, url: string, domain: string, log: (
     if (mailtoLinks.length > 0) {
       log(`   📧 Found ${mailtoLinks.length} mailto: links: ${mailtoLinks.join(', ')}`);
       
-      const getDomainWithoutTLD = (fullDomain: string): string => {
-        const normalized = fullDomain.replace(/^www\./, '');
-        const parts = normalized.split('.');
-        return parts.length > 1 ? parts.slice(0, -1).join('.') : normalized;
-      };
-      
-      const domainWithoutTLD = getDomainWithoutTLD(domain);
-      
       for (const email of mailtoLinks) {
         if (email && email.includes('@')) {
           const cleaned = cleanEmail(email);
           if (cleaned) {
-            const emailDomain = cleaned.split('@')[1].toLowerCase();
-            const emailDomainWithoutTLD = getDomainWithoutTLD(emailDomain);
-            
-            if (emailDomainWithoutTLD === domainWithoutTLD || COMMON_PROVIDERS.includes(emailDomain)) {
-              log(`   ✅ Valid mailto: email found: ${cleaned}`);
+            // Hauptseite: mailto immer akzeptieren
+            if (isMainPage) {
+              log(`   ✅ Mailto from main page accepted: ${cleaned}`);
               return cleaned;
-            } else {
-              log(`   ⛔ Mailto link rejected: ${cleaned} (domain: ${domain})`);
             }
+            // Subpages: erst exakt, dann fuzzy
+            if (isEmailFromDomain(cleaned, domain, true)) {
+              log(`   ✅ Exact match mailto: email found: ${cleaned}`);
+              return cleaned;
+            }
+            if (isEmailFromDomain(cleaned, domain, false)) {
+              log(`   ✅ Fuzzy match mailto: email found: ${cleaned}`);
+              return cleaned;
+            }
+            log(`   ⛔ Mailto link rejected: ${cleaned} (domain mismatch)`);
           }
         }
       }
@@ -238,39 +280,41 @@ async function searchPageForEmail(page: any, url: string, domain: string, log: (
       return null;
     }
 
-    const emails = allRawEmails
-      .map(email => cleanEmail(email))
-      .filter((email): email is string => email !== null);
+    // Clean all emails
+    const cleanedDirectEmails = directEmails.map((e: string) => cleanEmail(e)).filter((e: string | null): e is string => e !== null);
+    const cleanedObfuscatedEmails = obfuscatedEmails.map((e: string) => cleanEmail(e)).filter((e: string | null): e is string => e !== null);
     
-    if (emails.length !== allRawEmails.length) {
-      log(`   🧹 Cleaned: ${emails.join(', ')}`);
-    }
+    log(`   🧹 Cleaned direct: ${cleanedDirectEmails.join(', ')}`);
+    log(`   🧹 Cleaned obfuscated: ${cleanedObfuscatedEmails.join(', ')}`);
+    log(`   🔍 Validating against domain: ${domain}`);
     
-    const getDomainWithoutTLD = (fullDomain: string): string => {
-      const normalized = fullDomain.replace(/^www\./, '');
-      const parts = normalized.split('.');
-      return parts.length > 1 ? parts.slice(0, -1).join('.') : normalized;
-    };
-    
-    const domainWithoutTLD = getDomainWithoutTLD(domain);
-    log(`   🔍 Validating against domain: ${domain} (base: ${domainWithoutTLD})`);
-
-    for (const email of emails) {
-      const emailDomain = email.split('@')[1].toLowerCase();
-      const emailDomainWithoutTLD = getDomainWithoutTLD(emailDomain);
-      
-      log(`      Checking ${email}:`);
-      log(`         Email base: "${emailDomainWithoutTLD}"`);
-      log(`         Domain base: "${domainWithoutTLD}"`);
-      log(`         Common provider: ${COMMON_PROVIDERS.includes(emailDomain)}`);
-      
-      if (emailDomainWithoutTLD === domainWithoutTLD || COMMON_PROVIDERS.includes(emailDomain)) {
-        log(`      ✅ ACCEPTED: ${email}`);
+    // Direct emails: erst exakt, dann fuzzy
+    for (const email of cleanedDirectEmails) {
+      log(`      Checking direct email ${email} (exact):`);
+      if (isEmailFromDomain(email, domain, true)) {
+        log(`   ✅ Exact match (direct) email accepted: ${email}`);
         return email;
-      } else {
-        log(`      ❌ REJECTED: domain mismatch`);
       }
     }
+    
+    for (const email of cleanedDirectEmails) {
+      log(`      Checking direct email ${email} (fuzzy):`);
+      if (isEmailFromDomain(email, domain, false)) {
+        log(`   ✅ Fuzzy match (direct) email accepted: ${email}`);
+        return email;
+      }
+    }
+    
+    // Obfuscated emails: nur exakt
+    for (const email of cleanedObfuscatedEmails) {
+      log(`      Checking obfuscated email ${email} (exact only):`);
+      if (isEmailFromDomain(email, domain, true)) {
+        log(`   ✅ Exact match (obfuscated) email accepted: ${email}`);
+        return email;
+      }
+    }
+    
+    log(`   ❌ All emails rejected (no domain match)`);
   } catch (error) {
     log(`   ⚠️  Failed to load page: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }

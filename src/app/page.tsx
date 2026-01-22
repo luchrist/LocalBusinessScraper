@@ -172,15 +172,15 @@ export default function BusinessScraper() {
     <div className="min-h-screen bg-linear-to-br from-blue-50 to-indigo-100 p-8">
       <div className="max-w-4xl mx-auto">
         <div className="bg-white rounded-2xl shadow-xl p-8">
-          <h1 className="text-3xl font-bold text-gray-800 mb-2">Business Email Scraper</h1>
+          <h1 className="text-3xl font-bold text-gray-800 mb-2">Local Business Scraper</h1>
           <p className="text-gray-600 mb-8">
-            Finde automatisch Kontaktdaten von Unternehmen über Google Places API
+            Scrape thousands of local businesses by city and industry.
           </p>
 
           {/* Upload Section */}
           <div className="mb-8">
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Excel-Datei hochladen (Stadt, Branche)
+              Upload Excel or CSV File with the columns "city" and "industry":
             </label>
             <div 
               className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
@@ -202,9 +202,9 @@ export default function BusinessScraper() {
               <label htmlFor="file-upload" className="cursor-pointer">
                 <Upload className="mx-auto h-12 w-12 text-gray-400 mb-2" />
                 <p className="text-sm text-gray-600">
-                  {file ? file.name : 'Klicken zum Hochladen oder Datei hierher ziehen'}
+                  {file ? file.name : 'Click to upload or drag file here'}
                 </p>
-                <p className="text-xs text-gray-500 mt-1">XLSX, XLS oder CSV</p>
+                <p className="text-xs text-gray-500 mt-1">XLSX, XLS or CSV</p>
               </label>
             </div>
           </div>
@@ -219,12 +219,12 @@ export default function BusinessScraper() {
             {processing ? (
               <>
                 <Loader className="animate-spin mr-2" />
-                Verarbeite...
+                Processing...
               </>
             ) : (
               <>
                 <Play className="mr-2" />
-                Scraping starten
+                Start Scraping
               </>
             )}
           </button>
@@ -270,7 +270,7 @@ export default function BusinessScraper() {
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold text-gray-800 flex items-center">
                   <CheckCircle className="w-6 h-6 mr-2 text-green-500" />
-                  Ergebnisse ({results.length})
+                  Results ({results.length})
                 </h2>
                 <button
                   onClick={downloadResults}
@@ -285,8 +285,8 @@ export default function BusinessScraper() {
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 sticky top-0">
                     <tr>
-                      <th className="px-4 py-2 text-left font-semibold">Stadt</th>
-                      <th className="px-4 py-2 text-left font-semibold">Branche</th>
+                      <th className="px-4 py-2 text-left font-semibold">City</th>
+                      <th className="px-4 py-2 text-left font-semibold">Industry</th>
                       <th className="px-4 py-2 text-left font-semibold">Name</th>
                       <th className="px-4 py-2 text-left font-semibold">Email</th>
                       <th className="px-4 py-2 text-left font-semibold">Status</th>
@@ -322,12 +322,11 @@ export default function BusinessScraper() {
 
           {/* Instructions */}
           <div className="mt-8 p-4 bg-gray-50 rounded-lg text-sm text-gray-600">
-            <h3 className="font-semibold text-gray-800 mb-2">So funktioniert's:</h3>
+            <h3 className="font-semibold text-gray-800 mb-2">How it works:</h3>
             <ol className="list-decimal list-inside space-y-1">
-              <li>Excel-Datei mit Spalten "Stadt" und "Branche" hochladen</li>
-              <li>Google Places API findet Unternehmen</li>
-              <li>Websites werden nach Email-Adressen durchsucht</li>
-              <li>Ergebnisse als CSV herunterladen</li>
+              <li>Upload Excel or CSV file with columns "city" and "industry"</li>
+              <li>Get a coffee</li>
+              <li>Download results as CSV</li>
             </ol>
           </div>
         </div>
