@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { chromium } from 'playwright';
-import { findEmail } from '@/lib/email-scraper';
+import { findContactInfo } from '@/lib/email-scraper';
 
 interface BusinessData {
   Stadt?: string;
@@ -18,6 +18,7 @@ interface BusinessResult {
   telefon?: string;
   website?: string;
   email?: string;
+  owner?: string;
   status: string;
 }
 
@@ -132,13 +133,14 @@ export async function POST(request: NextRequest) {
           });
 
           let email: string | null = null;
+          let owner: string | null = null;
           let status = 'no_website';
 
           if (place.website) {
             console.log(`🔗 Checking website for "${place.name}": ${place.website}`);
             await sendProgress({
               type: 'progress',
-              message: `Searching for email on ${place.website}`,
+              message: `Searching for email & owner on ${place.website}`,
               current: processedBusinesses,
               total: totalBusinessesFound,
               searchCount,
@@ -146,12 +148,18 @@ export async function POST(request: NextRequest) {
             });
             
             status = 'searching';
-            email = await findEmail(context, place.website);
+            const contactInfo = await findContactInfo(context, place.website);
+            email = contactInfo.email;
+            owner = contactInfo.owner;
+
             status = email ? 'success' : 'no_email';
             if (email) {
               console.log(`✉️  Email found: ${email}`);
             } else {
               console.log(`❌ No email found on ${place.website}`);
+            }
+            if (owner) {
+              console.log(`👤 Owner found: ${owner}`);
             }
           } else {
             console.log(`⚠️  No website for "${place.name}"`);
@@ -165,6 +173,7 @@ export async function POST(request: NextRequest) {
             telefon: place.phone,
             website: place.website,
             email: email || undefined,
+            owner: owner || undefined,
             status,
           });
           

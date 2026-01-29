@@ -11,6 +11,7 @@ interface BusinessResult {
   telefon?: string;
   website?: string;
   email?: string;
+  owner?: string;
   status?: string;
 }
 
@@ -148,7 +149,7 @@ export default function BusinessScraper() {
     if (!results) return;
 
     const csv = [
-      ['Stadt', 'Branche', 'Name', 'Adresse', 'Telefon', 'Website', 'Email', 'Status'].join(','),
+      ['Stadt', 'Branche', 'Name', 'Adresse', 'Telefon', 'Website', 'Email', 'Geschäftsführer', 'Status'].join(','),
       ...results.map((r: BusinessResult) => [
         r.stadt,
         r.branche,
@@ -157,6 +158,7 @@ export default function BusinessScraper() {
         r.telefon || '',
         r.website || '',
         r.email || '',
+        r.owner || '',
         r.status || ''
       ].map(field => `"${String(field).replace(/"/g, '""')}"`).join(','))
     ].join('\n');
@@ -289,6 +291,7 @@ export default function BusinessScraper() {
                       <th className="px-4 py-2 text-left font-semibold">Industry</th>
                       <th className="px-4 py-2 text-left font-semibold">Name</th>
                       <th className="px-4 py-2 text-left font-semibold">Email</th>
+                      <th className="px-4 py-2 text-left font-semibold">Geschäftsführer</th>
                       <th className="px-4 py-2 text-left font-semibold">Status</th>
                     </tr>
                   </thead>
@@ -303,6 +306,13 @@ export default function BusinessScraper() {
                             <span className="text-green-600 font-medium">{r.email}</span>
                           ) : (
                             <span className="text-gray-400">-</span>
+                          )}
+                        </td>
+                         <td className="px-4 py-2">
+                          {r.owner ? (
+                            <span className="text-blue-600 font-medium">{r.owner}</span>
+                          ) : (
+                             <span className="text-gray-400">-</span>
                           )}
                         </td>
                         <td className="px-4 py-2">

@@ -1,14 +1,18 @@
 import { Page, BrowserContext } from 'playwright';
+import { extractNames } from './extractNames';
 
 export const EMAIL_REGEX = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
 export const OBFUSCATED_EMAIL_REGEX = /([\w.+\-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|\<at\>|at|AT|ät))\s*([A-Za-z0-9.\-]+)\.([A-Za-z]{2,})/gi;
 export const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net', 'aol.com'];
 
+export interface ScrapeResult {
+  email: string | null;
+  owner: string | null;
+}
+
 // Clean email by removing leading numbers and ensure it starts with a letter
 export function cleanEmail(email: string): string | null {
-  // Remove leading numbers until we hit a letter
   const cleaned = email.replace(/^[0-9]+/, '');
-  // Check if it starts with a letter now
   if (cleaned && /^[A-Za-z]/.test(cleaned)) {
     return cleaned;
   }
@@ -40,15 +44,12 @@ export function isEmailFromDomain(email: string, expectedDomain: string, strictM
   const emailDomainWithoutTLD = getDomainWithoutTLD(emailDomain);
   const domainWithoutTLD = getDomainWithoutTLD(expectedDomain);
   
-  // Exact match
   if (emailDomainWithoutTLD === domainWithoutTLD) return true;
   
-  // Fuzzy match (if not strict)
   if (!strictMode) {
     const normalizedEmail = normalizeDomain(emailDomainWithoutTLD);
     const normalizedExpected = normalizeDomain(domainWithoutTLD);
     
-    // Check if one contains the other (min 8 chars to avoid false positives)
     if (normalizedEmail.length >= 8 && normalizedExpected.length >= 8) {
       if (normalizedEmail.includes(normalizedExpected) || normalizedExpected.includes(normalizedEmail)) {
         return true;
@@ -59,172 +60,214 @@ export function isEmailFromDomain(email: string, expectedDomain: string, strictM
   return false;
 }
 
-export async function searchPageForEmail(page: Page, url: string, domain: string, isMainPage: boolean = false): Promise<string | null> {
-  try {
-    console.log(`   📲 Loading: ${url}`);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
-    
-    // 1. Zuerst nach mailto: Links in der HTML-Struktur suchen
-    console.log(`   🔍 Checking mailto: links...`);
-    const mailtoLinks = await page.$$eval('a[href^="mailto:"]', (anchors: HTMLAnchorElement[]) =>
-      anchors.map((a: HTMLAnchorElement) => {
-        const href = a.getAttribute('href') || '';
-        return href.replace('mailto:', '').split('?')[0].trim();
-      })
-    );
-    
-    if (mailtoLinks.length > 0) {
-      console.log(`   📧 Found ${mailtoLinks.length} mailto: links: ${mailtoLinks.join(', ')}`);
-      for (const email of mailtoLinks) {
-        if (email && email.includes('@')) {
-          const cleaned = cleanEmail(email);
-          if (cleaned) {
-            // Hauptseite: mailto immer akzeptieren
-            if (isMainPage) {
-              console.log(`   ✅ Mailto from main page accepted: ${cleaned}`);
-              return cleaned;
-            }
-            // Subpages: erst exakt, dann fuzzy
-            if (isEmailFromDomain(cleaned, domain, true)) {
-              console.log(`   ✅ Exact match mailto: email found: ${cleaned}`);
-              return cleaned;
-            }
-            if (isEmailFromDomain(cleaned, domain, false)) {
-              console.log(`   ✅ Fuzzy match mailto: email found: ${cleaned}`);
-              return cleaned;
-            }
-            console.log(`   ⛔ Mailto link rejected: ${cleaned} (domain mismatch)`);
+async function extractEmailFromPage(page: Page, domain: string, isMainPage: boolean, log: (msg: string) => void): Promise<string | null> {
+  // 1. Mailto links
+  log(`   🔍 Checking mailto: links...`);
+  const mailtoLinks = await page.$$eval('a[href^="mailto:"]', (anchors: HTMLAnchorElement[]) =>
+    anchors.map((a: HTMLAnchorElement) => {
+      const href = a.getAttribute('href') || '';
+      return href.replace('mailto:', '').split('?')[0].trim();
+    })
+  );
+  
+  if (mailtoLinks.length > 0) {
+    log(`   📧 Found ${mailtoLinks.length} mailto: links: ${mailtoLinks.join(', ')}`);
+    for (const email of mailtoLinks) {
+      if (email && email.includes('@')) {
+        const cleaned = cleanEmail(email);
+        if (cleaned) {
+          if (isMainPage) {
+            log(`   ✅ Mailto from main page accepted: ${cleaned}`);
+            return cleaned;
           }
+          if (isEmailFromDomain(cleaned, domain, true)) {
+            log(`   ✅ Exact match mailto: email found: ${cleaned}`);
+            return cleaned;
+          }
+          if (isEmailFromDomain(cleaned, domain, false)) {
+            log(`   ✅ Fuzzy match mailto: email found: ${cleaned}`);
+            return cleaned;
+          }
+          log(`   ⛔ Mailto link rejected: ${cleaned} (domain mismatch)`);
         }
       }
     }
-    
-    // 2. Fallback: Text-basierte Suche
-    console.log(`   🔍 Fallback: Checking text content...`);
-    const text = await page.textContent('body');
-    
-    if (!text) {
-      console.log(`   ⚠️  No text content found on page`);
-      return null;
-    }
-
-    const directEmails = text?.match(EMAIL_REGEX) || [];
-    console.log(`   📧 Direct emails found: ${directEmails.length}`);
-    if (directEmails.length > 0) {
-      console.log(`      Raw: ${directEmails.join(', ')}`);
-    }
-
-    // Also catch obfuscated forms like "info at domain.de" or "info[at]domain.de"
-    const obfuscatedEmails: string[] = [];
-    if (text) {
-      let match: RegExpExecArray | null;
-      while ((match = OBFUSCATED_EMAIL_REGEX.exec(text)) !== null) {
-        const candidate = `${match[1]}@${match[2]}.${match[3]}`;
-        obfuscatedEmails.push(candidate);
-      }
-    }
-    
-    console.log(`   🔐 Obfuscated emails found: ${obfuscatedEmails.length}`);
-    if (obfuscatedEmails.length > 0) {
-      console.log(`      Raw: ${obfuscatedEmails.join(', ')}`);
-    }
-
-    // Clean all emails
-    const cleanedDirectEmails = directEmails.map((e: string) => cleanEmail(e)).filter((e: string | null): e is string => e !== null);
-    const cleanedObfuscatedEmails = obfuscatedEmails.map((e: string) => cleanEmail(e)).filter((e: string | null): e is string => e !== null);
-    
-    // Direct emails: erst exakt, dann fuzzy
-    for (const email of cleanedDirectEmails) {
-      if (isEmailFromDomain(email, domain, true)) {
-        console.log(`   ✅ Exact match (direct) email accepted: ${email}`);
-        return email;
-      }
-    }
-    
-    for (const email of cleanedDirectEmails) {
-      if (isEmailFromDomain(email, domain, false)) {
-        console.log(`   ✅ Fuzzy match (direct) email accepted: ${email}`);
-        return email;
-      }
-    }
-    
-    // Obfuscated emails: nur exakt
-    for (const email of cleanedObfuscatedEmails) {
-      if (isEmailFromDomain(email, domain, true)) {
-        console.log(`   ✅ Exact match (obfuscated) email accepted: ${email}`);
-        return email;
-      }
-    }
-  } catch (error) {
-    // Seite konnte nicht geladen werden
-    console.log(`   ⚠️  Failed to load page: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 
+  // 2. Text content
+  log(`   🔍 Finding emails in text...`);
+  const text = await page.textContent('body');
+  if (!text) {
+    log(`   ⚠️  No text content found on page`);
+    return null;
+  }
+
+  const directEmails = text?.match(EMAIL_REGEX) || [];
+  const obfuscatedEmails: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = OBFUSCATED_EMAIL_REGEX.exec(text)) !== null) {
+      obfuscatedEmails.push(`${match[1]}@${match[2]}.${match[3]}`);
+  }
+
+  const cleanedDirectEmails = directEmails.map((e: string) => cleanEmail(e)).filter((e: string | null): e is string => e !== null);
+  const cleanedObfuscatedEmails = obfuscatedEmails.map((e: string) => cleanEmail(e)).filter((e: string | null): e is string => e !== null);
+
+  for (const email of cleanedDirectEmails) {
+    if (isEmailFromDomain(email, domain, true)) {
+      log(`   ✅ Exact match (direct) email accepted: ${email}`);
+      return email;
+    }
+  }
+  for (const email of cleanedDirectEmails) {
+    if (isEmailFromDomain(email, domain, false)) {
+      log(`   ✅ Fuzzy match (direct) email accepted: ${email}`);
+      return email;
+    }
+  }
+  for (const email of cleanedObfuscatedEmails) {
+    if (isEmailFromDomain(email, domain, true)) {
+      log(`   ✅ Exact match (obfuscated) email accepted: ${email}`);
+      return email;
+    }
+  }
+  
   return null;
 }
 
-export async function findEmail(context: BrowserContext, websiteUrl: string): Promise<string | null> {
-  console.log(`🕷️  Starting email search for: ${websiteUrl}`);
+async function searchPageForOwner(page: Page, log: (msg: string) => void): Promise<string | null> {
+  try {
+    // Prefer innerText to preserve structure/newlines, fallback to textContent
+    let text = await page.evaluate(() => document.body.innerText).catch(() => null);
+    if (!text) text = await page.textContent('body');
+    
+    if (!text) return null;
+    
+    // Try regex extraction first
+    const names = extractNames(text, { takeFirst: false });
+    if (names.length > 0) {
+        const owner = names.join(', ');
+        log(`   👤 Owner found (regex): ${owner}`);
+        return owner;
+    }
+    
+    // Fallback to LLM if regex found nothing
+    log(`   🤖 No owner found with regex, trying LLM...`);
+    try {
+      const { extractOwnerWithLLM } = await import('./llm-extractor');
+      const llmOwner = await extractOwnerWithLLM(text);
+      if (llmOwner) {
+          log(`   👤 Owner found (LLM): ${llmOwner}`);
+          return llmOwner;
+      }
+    } catch (llmError) {
+      log(`   ⚠️ LLM extraction unavailable: ${llmError instanceof Error ? llmError.message : String(llmError)}`);
+    }
+    
+  } catch (e) {
+      log(`   ⚠️ Failed to search for owner: ${e}`);
+  }
+  return null;
+}
+
+export async function findContactInfo(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void): Promise<ScrapeResult> {
+  const result: ScrapeResult = { email: null, owner: null };
+  const logger = log || console.log;
+  
+  logger(`🕷️  Starting scraping for: ${websiteUrl}`);
+
   const page = await context.newPage();
   const visited = new Set<string>();
-  const baseUrl = new URL(websiteUrl);
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(websiteUrl);
+  } catch (e) {
+    logger(`❌ Invalid URL: ${websiteUrl}`);
+    await page.close();
+    return result;
+  }
+  
   const domain = baseUrl.hostname.replace(/^www\./, '');
+  
+  const processPage = async (url: string, isMainPage: boolean = false) => {
+     if (visited.has(url)) return;
+     visited.add(url);
+     
+     try {
+       logger(`   📲 Loading: ${url}`);
+       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+       
+       if (!result.email) {
+            result.email = await extractEmailFromPage(page, domain, isMainPage, logger);
+       }
+       
+       const isImpressum = /impressum|imprint|kontakt/i.test(url);
+       const shouldSearchOwner = !result.owner && isImpressum;
+       
+       if (shouldSearchOwner) {
+           logger(`   🔍 Scanning for owner on impressum...`);
+           const owner = await searchPageForOwner(page, logger);
+           if (owner) result.owner = owner;
+       }
+
+     } catch (e) {
+         logger(`   ⚠️ Error processing ${url}: ${e instanceof Error ? e.message : String(e)}`);
+     }
+  };
+
 
   try {
-    // Suche auf der Hauptseite
-    console.log(`🔎 Scanning main page...`);
-    const email = await searchPageForEmail(page, websiteUrl, domain, true);
-    if (email) {
-      console.log(`✅ Email found on main page: ${email}`);
-      return email;
-    }
-
-    console.log(`📄 Fetching subpages...`);
-    await page.goto(websiteUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
-    const rawLinks: string[] = await page.$$eval('a[href]', (anchors: HTMLAnchorElement[]) =>
-      anchors
-        .map((a: HTMLAnchorElement) => a.getAttribute('href') || '')
-        .filter((href: string) => href.trim().length > 0)
-    );
-
-    console.log(`🔗 Found ${rawLinks.length} links on page`);
-
-    const subpages = rawLinks
-      .map(link => {
-        try {
-          return new URL(link, baseUrl).href; // resolve relative to base
-        } catch {
-          return null;
-        }
-      })
-      .filter((link): link is string => {
-        if (!link) return false;
-        try {
-          const url = new URL(link);
-          return url.hostname.replace(/^www\./, '') === domain && !visited.has(link);
-        } catch {
-          return false;
-        }
-      });
-
-    console.log(`📋 Checking ${subpages.length} subpages for emails`);
-
-    for (const link of subpages) {
-      visited.add(link);
-      console.log(`   🔍 Checking: ${link}`);
-      const email = await searchPageForEmail(page, link, domain);
-      if (email) {
-        console.log(`✅ Email found on subpage: ${email}`);
-        return email;
+      await processPage(websiteUrl, true);
+      
+      if (result.email && result.owner) {
+          await page.close();
+          return result;
       }
-    }
+      
+      const rawLinks = await page.$$eval('a[href]', (anchors: HTMLAnchorElement[]) => 
+          anchors.map(a => a.getAttribute('href') || '').filter(h => h.trim().length > 0)
+      ).catch(() => []);
+      
+      const subpages = rawLinks.map(link => {
+          try { return new URL(link, baseUrl).href; } catch { return null; }
+      }).filter((link): link is string => {
+          if (!link) return false;
+          try {
+             const u = new URL(link);
+             return u.hostname.replace(/^www\./, '') === domain && !visited.has(link);
+          } catch { return false; }
+      });
+      
+      const priorityPages = subpages.filter(url => /impressum|imprint|kontakt/i.test(url));
+      const otherPages = subpages.filter(url => !/impressum|imprint|kontakt/i.test(url));
+      
+      const orderedPages = [...priorityPages, ...otherPages];
+      logger(`📋 checking ${orderedPages.length} subpages`);
 
-    console.log(`⚠️  No email found after checking ${subpages.length + 1} pages`);
-  } catch (error) {
-    console.error(`❌ Error scraping ${websiteUrl}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      for (const link of orderedPages) {
+          if (result.email && result.owner) break;
+          
+          const isImpressum = /impressum|imprint|kontakt/i.test(link);
+          if (result.email && !isImpressum && !result.owner) {
+              continue;
+          }
+
+          await processPage(link, false);
+      }
+      
+      if (!result.owner) {
+         logger(`   ⚠️ No owner found after checking pages.`);
+      }
+
+  } catch(e) {
+      logger(`❌ Error scraping ${websiteUrl}: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
-    await page.close();
+      if (!page.isClosed()) await page.close();
   }
+  
+  return result;
+}
 
-  return null;
+export async function findEmail(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void): Promise<string | null> {
+    const res = await findContactInfo(context, websiteUrl, log);
+    return res.email;
 }
