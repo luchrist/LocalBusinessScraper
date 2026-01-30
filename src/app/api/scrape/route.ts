@@ -55,6 +55,11 @@ export async function POST(request: NextRequest) {
     try {
       const formData = await request.formData();
       const file = formData.get('file') as File;
+      const searchEmail = formData.get('searchEmail') === 'true';
+      const searchOwner = formData.get('searchOwner') === 'true';
+      const country = (formData.get('country') as string) || 'de';
+      const maxBusinessesStr = formData.get('maxBusinesses') as string;
+      const maxBusinesses = maxBusinessesStr === 'max' ? Infinity : parseInt(maxBusinessesStr) || Infinity;
 
       if (!file) {
         console.error('❌ No file uploaded');
@@ -64,6 +69,7 @@ export async function POST(request: NextRequest) {
       }
 
       console.log(`📁 File received: ${file.name} (${file.size} bytes)`);
+      console.log(`⚙️  Options: searchEmail=${searchEmail}, searchOwner=${searchOwner}, country=${country}, maxBusinesses=${maxBusinesses}`);
 
       // Parse Excel file
       const buffer = await file.arrayBuffer();
@@ -107,7 +113,7 @@ export async function POST(request: NextRequest) {
         console.log(`🔍 Searching for "${branche}" in "${stadt}"`);
         
         // Suche mit Google Places API
-        const places = await searchPlaces(stadt, branche);
+        const places = await searchPlaces(stadt, branche, maxBusinesses);
         console.log(`✅ Found ${places.length} places for "${branche}" in "${stadt}"`);
         
         totalBusinessesFound += places.length;
@@ -121,7 +127,9 @@ export async function POST(request: NextRequest) {
           totalSearches: totalSearches,
         });
 
-        for (const place of places) {
+        // Define processing logic for a single place
+        const processPlace = async (place: Place) => {
+          if (processedBusinesses >= maxBusinesses) return;
 
           await sendProgress({
             type: 'progress',
@@ -136,11 +144,11 @@ export async function POST(request: NextRequest) {
           let owner: string | null = null;
           let status = 'no_website';
 
-          if (place.website) {
+          if (place.website && (searchEmail || searchOwner)) {
             console.log(`🔗 Checking website for "${place.name}": ${place.website}`);
             await sendProgress({
               type: 'progress',
-              message: `Searching for email & owner on ${place.website}`,
+              message: `Searching for ${searchEmail && searchOwner ? 'email & owner' : searchEmail ? 'email' : 'owner'} on ${place.website}`,
               current: processedBusinesses,
               total: totalBusinessesFound,
               searchCount,
@@ -148,21 +156,34 @@ export async function POST(request: NextRequest) {
             });
             
             status = 'searching';
-            const contactInfo = await findContactInfo(context, place.website);
-            email = contactInfo.email;
-            owner = contactInfo.owner;
+            const contactInfo = await findContactInfo(context, place.website, undefined, { 
+              searchEmail, 
+              searchOwner,
+              country
+            });
+            
+            if (searchEmail) {
+              email = contactInfo.email;
+            }
+            if (searchOwner) {
+              owner = contactInfo.owner;
+            }
 
-            status = email ? 'success' : 'no_email';
+            status = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
             if (email) {
               console.log(`✉️  Email found: ${email}`);
-            } else {
-              console.log(`❌ No email found on ${place.website}`);
             }
             if (owner) {
               console.log(`👤 Owner found: ${owner}`);
             }
-          } else {
+            if (!email && !owner && (searchEmail || searchOwner)) {
+              console.log(`❌ No ${searchEmail && searchOwner ? 'email or owner' : searchEmail ? 'email' : 'owner'} found on ${place.website}`);
+            }
+          } else if (!place.website) {
             console.log(`⚠️  No website for "${place.name}"`);
+          } else {
+            console.log(`⏭️  Skipping contact info search for "${place.name}" (disabled)`);
+            status = 'skipped';
           }
 
           results.push({
@@ -185,7 +206,47 @@ export async function POST(request: NextRequest) {
             current: processedBusinesses,
             total: totalBusinessesFound,
           });
+        };
+
+        // Group places by domain to respect "max 1 per domain" constraint
+        const domainGroups = new Map<string, Place[]>();
+        const noWebsitePlaces: Place[] = [];
+
+        for (const place of places) {
+            if (place.website) {
+               try {
+                   const domain = new URL(place.website).hostname;
+                   if (!domainGroups.has(domain)) domainGroups.set(domain, []);
+                   domainGroups.get(domain)!.push(place);
+               } catch {
+                   noWebsitePlaces.push(place);
+               }
+            } else {
+                noWebsitePlaces.push(place);
+            }
         }
+
+        // Create tasks
+        const tasks: (() => Promise<void>)[] = [];
+
+        // 1. Domain tasks (Sequential processing of places for that domain)
+        for (const [_, groupPlaces] of domainGroups) {
+            tasks.push(async () => {
+                for (const place of groupPlaces) {
+                   await processPlace(place);
+                }
+            });
+        }
+
+        // 2. No website tasks (can be parallelized individually)
+        for (const place of noWebsitePlaces) {
+            tasks.push(async () => {
+                await processPlace(place);
+            });
+        }
+
+        // Execute with concurrency limit of 10
+        await runWithLimit(tasks, 10);
       }
 
       await context.close();
@@ -217,7 +278,19 @@ export async function POST(request: NextRequest) {
   });
 }
 
-async function searchPlaces(stadt: string, branche: string): Promise<Place[]> {
+// Helper for concurrency
+async function runWithLimit(tasks: (() => Promise<void>)[], limit: number) {
+    let index = 0;
+    async function worker() {
+        while (index < tasks.length) {
+            const task = tasks[index++];
+            if (task) await task();
+        }
+    }
+    await Promise.all(Array(limit).fill(0).map(worker));
+}
+
+async function searchPlaces(stadt: string, branche: string, maxBusinesses?: number): Promise<Place[]> {
   const query = `${branche} in ${stadt}`;
   console.log(`📍 Calling Google Places API with query: "${query}"`);
   
@@ -269,7 +342,7 @@ async function searchPlaces(stadt: string, branche: string): Promise<Place[]> {
     if (pageToken) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-  } while (pageToken);
+  } while (pageToken && (!maxBusinesses || allPlaces.length < maxBusinesses));
 
   console.log(`✅ Total places found across all pages: ${allPlaces.length}`);
   return allPlaces;
