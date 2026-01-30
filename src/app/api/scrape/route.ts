@@ -23,6 +23,7 @@ interface BusinessResult {
 }
 
 interface Place {
+  id: string;
   name: string;
   address: string;
   phone: string;
@@ -79,7 +80,10 @@ export async function POST(request: NextRequest) {
       console.log(`📊 Excel file parsed: ${data.length} rows found`);
 
       const results: BusinessResult[] = [];
-      const browser = await chromium.launch({ 
+      const seenPlaceIds = new Set<string>();
+      const seenDomains = new Set<string>();
+      
+      const browser = await chromium.launch({  
         headless: true,
         args: [
           '--disable-blink-features=AutomationControlled',
@@ -116,11 +120,41 @@ export async function POST(request: NextRequest) {
         const places = await searchPlaces(stadt, branche, maxBusinesses);
         console.log(`✅ Found ${places.length} places for "${branche}" in "${stadt}"`);
         
-        totalBusinessesFound += places.length;
+        // Deduplicate places
+        const uniquePlaces: Place[] = [];
+        for (const place of places) {
+            // Check ID
+            if (seenPlaceIds.has(place.id)) {
+              console.log(`♻️ Skipping duplicate place ID: ${place.name}`);
+              continue;
+            }
+            
+            // Check Domain
+            let domain: string | null = null;
+            if (place.website) {
+                try {
+                    domain = new URL(place.website).hostname.replace(/^www\./, '');
+                } catch {}
+            }
+            
+            if (domain && seenDomains.has(domain)) {
+              console.log(`♻️ Skipping duplicate domain: ${domain} (${place.name})`);
+              continue;
+            }
+            
+            // Add to new sets
+            seenPlaceIds.add(place.id);
+            if (domain) seenDomains.add(domain);
+            uniquePlaces.push(place);
+        }
+
+        console.log(`✅ Deduplicated: ${places.length} -> ${uniquePlaces.length} unique new places to process`);
+        
+        totalBusinessesFound += uniquePlaces.length;
         
         await sendProgress({
           type: 'progress',
-          message: `Searching for "${branche}" in "${stadt}" - ${places.length} found`,
+          message: `Searching for "${branche}" in "${stadt}" - ${uniquePlaces.length} new unique places found`,
           current: processedBusinesses,
           total: totalBusinessesFound,
           searchCount,
@@ -212,7 +246,7 @@ export async function POST(request: NextRequest) {
         const domainGroups = new Map<string, Place[]>();
         const noWebsitePlaces: Place[] = [];
 
-        for (const place of places) {
+        for (const place of uniquePlaces) {
             if (place.website) {
                try {
                    const domain = new URL(place.website).hostname;
@@ -312,7 +346,7 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': GOOGLE_PLACES_API_KEY!,
-        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,nextPageToken',
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,nextPageToken',
       },
       body: JSON.stringify(requestBody),
     });
@@ -328,6 +362,7 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
     console.log(`📦 Page ${pageNumber} returned ${places.length} places`);
 
     const mappedPlaces = places.map((place: any) => ({
+      id: place.id || '',
       name: place.displayName?.text || '',
       address: place.formattedAddress || '',
       phone: place.nationalPhoneNumber || '',

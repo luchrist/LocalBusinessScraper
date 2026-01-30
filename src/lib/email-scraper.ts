@@ -32,10 +32,27 @@ async function humanLikeInteraction(page: Page) {
   } catch (e) {}
 }
 
-// Clean email by removing leading numbers and ensure it starts with a letter
+// Clean email by removing leading numbers, decoding, and trimming
 export function cleanEmail(email: string): string | null {
-  const cleaned = email.replace(/^[0-9]+/, '');
-  if (cleaned && /^[A-Za-z]/.test(cleaned)) {
+  if (!email) return null;
+  
+  let cleaned = email;
+  
+  // Decode URI components (e.g. %20 -> space)
+  try {
+      cleaned = decodeURIComponent(cleaned);
+  } catch {}
+
+  // Remove whitespace and invisible characters
+  cleaned = cleaned.trim().replace(/\s+/g, '');
+
+  // Remove leading numbers
+  cleaned = cleaned.replace(/^[0-9]+/, '');
+  
+  // Remove common trailing punctuation/garbage that might be captured
+  cleaned = cleaned.replace(/[.,;:%]+$/, '');
+
+  if (cleaned && /^[A-Za-z]/.test(cleaned) && cleaned.includes('@')) {
     return cleaned;
   }
   return null;

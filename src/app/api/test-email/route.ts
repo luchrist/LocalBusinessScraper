@@ -6,8 +6,25 @@ const OBFUSCATED_EMAIL_REGEX = /([\w.+\-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|
 const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net', 'aol.com'];
 
 function cleanEmail(email: string): string | null {
-  const cleaned = email.replace(/^[0-9]+/, '');
-  if (cleaned && /^[A-Za-z]/.test(cleaned)) {
+  if (!email) return null;
+  
+  let cleaned = email;
+  
+  // Decode URI components (e.g. %20 -> space)
+  try {
+      cleaned = decodeURIComponent(cleaned);
+  } catch {}
+
+  // Remove whitespace and invisible characters
+  cleaned = cleaned.trim().replace(/\s+/g, '');
+
+  // Remove leading numbers
+  cleaned = cleaned.replace(/^[0-9]+/, '');
+  
+  // Remove common trailing punctuation/garbage that might be captured
+  cleaned = cleaned.replace(/[.,;:%]+$/, '');
+
+  if (cleaned && /^[A-Za-z]/.test(cleaned) && cleaned.includes('@')) {
     return cleaned;
   }
   return null;
