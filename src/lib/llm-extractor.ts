@@ -78,21 +78,34 @@ function releaseSession(item: { session: any; context: any }) {
   }
 }
 
-export async function extractOwnerWithLLM(impressumText: string): Promise<string | null> {
+export async function extractOwnerWithLLM(impressumText: string, businessInfo?: { name?: string, industry?: string }): Promise<string | null> {
   const worker = await getSession();
   if (!worker) {
     console.log("⚠️ LLM not available, skipping AI extraction");
     return null;
   }
 
-  console.log("impressumText:", impressumText);
+  console.log("impressum:", impressumText.substring(0, 1500));
 
   try {
     const { session } = worker;
     // console.log(`🤖 LLM Worker active (Queue: ${waitingQueue.length})`);
 
-    const prompt = `You are a data extraction assistant. Extract the owner/manager names (Geschäftsführer, Inhaber, etc.) from the Impressum text below.
-        
+    const prompt = `You are a strict German legal-notice (Impressum) extraction assistant.
+
+Business Name: ${businessInfo?.name || "Unknown"}
+Industry: ${businessInfo?.industry || "Unknown"}
+
+Task: Extract the NATURAL PERSON name(s) that represent the business from the text below.
+Accept these roles as valid indicators of the right person:
+- Inhaber/in, Geschäftsführer/in, Vertreten durch, Geschäftsleitung
+- Verantwortliche/r, Verantwortlich im Sinne der DSGVO, Verantwortlich für den Inhalt
+
+Rules:
+- Output ONLY natural person names (e.g., "Jasmin Schuster"). Never output addresses, streets, cities, phone numbers, emails, or company/shop names.
+- If no natural person is explicitly named in one of the roles above, return names: null.
+- If a person is found, set confidence >= 0.7 and include the matched role label.
+
 Return ONLY a JSON object with this format:
 {
   "names": "Name 1, Name 2" (or null if none found),
@@ -126,6 +139,27 @@ JSON Response:`;
 
       if (!result.names || result.names === "null" || result.names.length < 3) {
         return null;
+      }
+      
+      // Simple validation: check if returned name looks like a business name
+      const forbiddenTerms = [
+        'gmbh', 'ug', 'ag', 'limited', 'ltd', 'inc', 'corp', 'co.', ' e.v.', 'restaurant', 'hotel', 'cafe', 'bar', 'bistro', 'praxis', 'kanzlei', 'shop', 'store', 'markt', 'service', 'team'
+      ];
+      const lowerName = result.names.toLowerCase();
+      
+      if (forbiddenTerms.some(term => lowerName.includes(term))) {
+         console.log(`   🚫 LLM returned a business name/role instead of person: "${result.names}". Discarding.`);
+         return null;
+      }
+
+      // Check against explicit business info if available
+      if (businessInfo?.name && lowerName.includes(businessInfo.name.toLowerCase())) {
+          console.log(`   🚫 LLM returned the business name itself: "${result.names}". Discarding.`);
+          return null;
+      }
+      if (businessInfo?.industry && lowerName.includes(businessInfo.industry.toLowerCase())) {
+          console.log(`   🚫 LLM returned the industry name: "${result.names}". Discarding.`);
+          return null;
       }
 
       return result.names;

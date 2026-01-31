@@ -66,8 +66,8 @@ export function getDomainWithoutTLD(fullDomain: string): string {
 
 // Country-specific imprint page patterns
 const imprintPatterns: Record<string, RegExp> = {
-  de: /impressum|imprint|kontakt|datenschutz|rechtliche|rechtliches/i,
-  at: /impressum|imprint|kontakt|offenlegung|medieninhaber/i,
+  de: /impressum|imprint|rechtliche|rechtliches|kontakt/i,
+  at: /impressum|imprint|offenlegung|medieninhaber|kontakt/i,
   ch: /impressum|imprint|kontakt|herausgeber/i,
   us: /about|contact|legal|privacy|terms/i,
   uk: /about|contact|legal|privacy|terms|company-info/i,
@@ -156,7 +156,7 @@ export function extractEmailsFromText(text: string, domain: string, log: (msg: s
 }
 
 // Extracted logic for finding owner in text (shared by HTTP and Playwright)
-export async function extractOwnerFromText(text: string, log: (msg: string) => void): Promise<string | null> {
+export async function extractOwnerFromText(text: string, businessInfo: { name?: string, industry?: string }, log: (msg: string) => void): Promise<string | null> {
     // Try regex extraction first
     const names = extractNames(text, { takeFirst: false });
     if (names.length > 0) {
@@ -169,7 +169,7 @@ export async function extractOwnerFromText(text: string, log: (msg: string) => v
     log(`   🤖 No owner found with regex, trying LLM...`);
     try {
       const { extractOwnerWithLLM } = await import('./llm-extractor');
-      const llmOwner = await extractOwnerWithLLM(text);
+      const llmOwner = await extractOwnerWithLLM(text, businessInfo);
       if (llmOwner) {
           log(`   👤 Owner found (LLM): ${llmOwner}`);
           return llmOwner;
@@ -218,14 +218,14 @@ async function extractEmailFromPage(page: Page, domain: string, isMainPage: bool
   return extractEmailsFromText(text, domain, log);
 }
 
-async function searchPageForOwner(page: Page, log: (msg: string) => void): Promise<string | null> {
+async function searchPageForOwner(page: Page, businessInfo: { name?: string, industry?: string }, log: (msg: string) => void): Promise<string | null> {
   try {
     // Prefer innerText to preserve structure/newlines, fallback to textContent
     let text = await page.evaluate(() => document.body.innerText).catch(() => null);
     if (!text) text = await page.textContent('body');
     
     if (!text) return null;
-    return extractOwnerFromText(text, log);
+    return extractOwnerFromText(text, businessInfo, log);
   } catch (e) {
       log(`   ⚠️ Failed to search for owner: ${e}`);
   }
@@ -293,8 +293,8 @@ async function tryHttpScrape(url: string, domain: string, options: { searchEmail
 
 
 // Playwright scraping with Jitter and Timeouts
-async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, domain: string, log: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string }, initialResult: ScrapeResult): Promise<ScrapeResult> {
-    const { searchEmail = true, searchOwner = true, country = 'de' } = options;
+async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, domain: string, log: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string }, initialResult: ScrapeResult): Promise<ScrapeResult> {
+    const { searchEmail = true, searchOwner = true, country = 'de', businessName, industry } = options;
     const result: ScrapeResult = { ...initialResult };
     const logger = log;
     const imprintPattern = getImprintPattern(country);
@@ -307,7 +307,7 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
     const visited = new Set<string>();
     
     // Add jitter to page actions
-    const processPage = async (url: string, isMainPage: boolean = false) => {
+    const processPage = async (url: string, isMainPage: boolean = false, skipOwnerSearch: boolean = false) => {
          if (visited.has(url)) return;
          visited.add(url);
          
@@ -323,11 +323,11 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
            }
            
            const isImpressum = imprintPattern.test(url);
-           const shouldSearchOwner = searchOwner && !result.owner && isImpressum;
+           const shouldSearchOwner = searchOwner && !result.owner && isImpressum && !skipOwnerSearch;
            
            if (shouldSearchOwner) {
                logger(`   🔍 Scanning for owner on impressum...`);
-               const owner = await searchPageForOwner(page, logger);
+               const owner = await searchPageForOwner(page, { name: businessName, industry }, logger);
                if (owner) result.owner = owner;
            }
     
@@ -362,20 +362,52 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
         });
         
         const priorityPages = subpages.filter(url => imprintPattern.test(url));
+        
+        // Sort priority pages so Impressum is checked BEFORE Kontakt
+        priorityPages.sort((a, b) => {
+             const score = (url: string) => {
+                 const lower = url.toLowerCase();
+                 // Highest priority: Explicit imprint/impressum
+                 if (lower.includes('impressum') || lower.includes('imprint')) return 3;
+                 // Medium priority: Legal/Disclosure
+                 if (lower.includes('recht') || lower.includes('legal') || lower.includes('offenlegung')) return 2;
+                 // Lowest priority for "imprint pages": Contact
+                 if (lower.includes('kontakt') || lower.includes('contact')) return 1;
+                 return 0; 
+             };
+             return score(b) - score(a);
+        });
+
         const otherPages = subpages.filter(url => !imprintPattern.test(url));
         
         const orderedPages = [...priorityPages, ...otherPages];
         logger(`📋 checking ${orderedPages.length} subpages`);
   
+        let impressumChecked = false;
+
         for (const link of orderedPages) {
+            // Stop conditions:
             if ((searchEmail && result.email && !searchOwner) || (searchOwner && result.owner && !searchEmail) || (result.email && result.owner)) break;
             
             const isImpressum = imprintPattern.test(link);
+            const isExplicitImpressum = link.toLowerCase().includes('impressum') || link.toLowerCase().includes('imprint');
+
+            // If we found email but no owner: only check impressum pages
             if (result.email && !isImpressum && !result.owner) {
                 continue;
             }
-  
-            await processPage(link, false);
+            
+            // Pass skipOwnerSearch=true if we already checked a "real" impressum
+            await processPage(link, false, impressumChecked);
+            
+            if (isExplicitImpressum) {
+                impressumChecked = true;
+                // If we checked an explicit impressum and found no owner, and we are not looking for email (or found it), we can stop.
+                if (searchOwner && !result.owner && (!searchEmail || result.email)) {
+                     logger('   🛑 Impressum checked, no owner. Stopping remaining owner text search.');
+                     break;
+                }
+            }
         }
         
     } catch (e) {
@@ -386,7 +418,7 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
     return result;
 }
 
-export async function findContactInfo(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string } = {}): Promise<ScrapeResult> {
+export async function findContactInfo(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string } = {}): Promise<ScrapeResult> {
   const { searchEmail = true, searchOwner = true, country = 'de' } = options;
   const logger = log || console.log;
   let result: ScrapeResult = { email: null, owner: null };

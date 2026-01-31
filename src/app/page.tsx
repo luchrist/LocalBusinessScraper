@@ -56,6 +56,7 @@ const translations = {
     errorOccurred: 'Ein Fehler ist aufgetreten',
     run: 'Durchlauf',
     of: 'von',
+    singleWorker: 'Single Worker Mode (Debug)',
   },
   en: {
     title: 'Local Business Scraper',
@@ -93,6 +94,7 @@ const translations = {
     errorOccurred: 'An error occurred',
     run: 'Run',
     of: 'of',
+    singleWorker: 'Single Worker Mode (Debug)',
   },
 };
 
@@ -126,6 +128,7 @@ export default function BusinessScraper() {
   const [isDragging, setIsDragging] = useState(false);
   const [language, setLanguage] = useState<Language>('de');
   const [searchEmail, setSearchEmail] = useState(true);
+  const [singleWorker, setSingleWorker] = useState(false);
   const [searchOwner, setSearchOwner] = useState(true);
   const [country, setCountry] = useState('de');
   const [maxBusinesses, setMaxBusinesses] = useState<number | 'max' | ''>(60);
@@ -189,6 +192,7 @@ export default function BusinessScraper() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('searchEmail', String(searchEmail));
+    formData.append('singleWorker', String(singleWorker));
     formData.append('searchOwner', String(searchOwner));
     formData.append('country', country);
     formData.append('maxBusinesses', String(!maxBusinesses ? 20 : (maxBusinesses === 'max' ? 100000 : maxBusinesses)));
@@ -439,6 +443,23 @@ export default function BusinessScraper() {
                   >
                     Max
                   </button>
+
+              {/* Single Worker Mode Toggle */}
+              <div className="flex items-center justify-between pt-2 border-t border-gray-200 mt-2">
+                <label className="text-sm font-medium text-gray-700">{t.singleWorker}</label>
+                <button
+                  onClick={() => setSingleWorker(!singleWorker)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    singleWorker ? 'bg-indigo-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      singleWorker ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
                 </div>
               </div>
             </div>

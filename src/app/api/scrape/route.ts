@@ -66,6 +66,7 @@ export async function POST(request: NextRequest) {
       const searchEmail = formData.get('searchEmail') === 'true';
       const searchOwner = formData.get('searchOwner') === 'true';
       const country = (formData.get('country') as string) || 'de';
+      const singleWorker = formData.get('singleWorker') === 'true';
       const maxBusinessesStr = formData.get('maxBusinesses') as string;
       const maxBusinesses = maxBusinessesStr === 'max' ? Infinity : parseInt(maxBusinessesStr) || Infinity;
 
@@ -77,7 +78,7 @@ export async function POST(request: NextRequest) {
       }
 
       console.log(`📁 File received: ${file.name} (${file.size} bytes)`);
-      console.log(`⚙️  Options: searchEmail=${searchEmail}, searchOwner=${searchOwner}, country=${country}, maxBusinesses=${maxBusinesses}`);
+      console.log(`⚙️  Options: searchEmail=${searchEmail}, searchOwner=${searchOwner}, country=${country}, maxBusinesses=${maxBusinesses}, singleWorker=${singleWorker}`);
 
       // Parse Excel file
       const buffer = await file.arrayBuffer();
@@ -116,7 +117,7 @@ export async function POST(request: NextRequest) {
         console.log('🚀 Using High-Volume Scraper (GoogleMapsScraper)');
         
         // Helper for email queue
-        const emailConcurrencyLimit = 5;
+        const emailConcurrencyLimit = singleWorker ? 1 : 5;
         let activeEmailScrapes = 0;
         const emailQueue: (() => Promise<void>)[] = [];
         
@@ -191,7 +192,9 @@ export async function POST(request: NextRequest) {
                         const contactInfo = await findContactInfo(context, placeResult.website, undefined, { 
                             searchEmail, 
                             searchOwner,
-                            country
+                            country,
+                            businessName: placeResult.name,
+                            industry: branche
                         });
                         email = contactInfo.email;
                         owner = contactInfo.owner;
@@ -242,8 +245,8 @@ export async function POST(request: NextRequest) {
           }
         });
 
-        // Run scraper rows with 3 parallel workers
-        await runWithLimit(rowTasks, 3);
+        // Run scraper rows with 3 parallel workers (or 1 if debug)
+        await runWithLimit(rowTasks, singleWorker ? 1 : 3);
         
         // Wait for remaining email tasks
         while(activeEmailScrapes > 0 || emailQueue.length > 0) {
@@ -344,7 +347,9 @@ export async function POST(request: NextRequest) {
                 const contactInfo = await findContactInfo(context, place.website, undefined, { 
                   searchEmail, 
                   searchOwner,
-                  country
+                  country,
+                  businessName: place.name,
+                  industry: branche
                 });
                 
                 if (searchEmail) {
@@ -433,8 +438,8 @@ export async function POST(request: NextRequest) {
                 });
             }
     
-            // Execute with concurrency limit of 10
-            await runWithLimit(tasks, 10);
+            // Execute with concurrency limit of 10 (or 1 if debug)
+            await runWithLimit(tasks, singleWorker ? 1 : 10);
             
             // Adjust totalBusinessesFound to reflect that we skipped some due to limit
             // This ensures the progress bar makes sense (e.g., if we found 20 but limit is 5, we shouldn't show 5/20 forever)
