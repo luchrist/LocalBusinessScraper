@@ -85,6 +85,8 @@ export async function extractOwnerWithLLM(impressumText: string): Promise<string
     return null;
   }
 
+  console.log("impressumText:", impressumText);
+
   try {
     const { session } = worker;
     // console.log(`🤖 LLM Worker active (Queue: ${waitingQueue.length})`);
@@ -107,6 +109,8 @@ JSON Response:`;
       maxTokens: 200,
       temperature: 0.1,
     });
+
+    console.log("   🤖 LLM Response:", response);
 
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;

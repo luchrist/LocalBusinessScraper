@@ -31,12 +31,12 @@ const CUE_BLOCK_REGEXES: RegExp[] = [
   /(?:\bve(?:r)?treten\s+durch\b)(?:\s+den\s+[^:\n]{0,80})?\s*:?\s*([\s\S]{1,500}?)(?=\n\s*\n|\n\s*(?:Vertreten\s+durch|Verantwortlich|Inhaltlich\s+verantwortlich)\b|$)/gi,
 
   // Verantwortlich für den Inhalt nach § 55 ...
-  /\bverantwortlich\s+im\s+sinne\s+von\s+§?\s*55\s*rstv\b\s*:?\s*([\s\S]{1,250}?)(?=\n|$)/gi, 
-  /\bverantwortlich\s+für\s+den\s+inhalt\b[^:\n]*:\s*([\s\S]{1,250}?)(?=\n|$)/gi,
+  /\bverantwortlich\s+im\s+sinne\s+von\s+§?\s*55\s*rstv\b\s*:?\s*([\s\S]{1,250}?)(?=\n\s*\n|$)/gi, 
+  /\bverantwortlich\s+für\s+den\s+inhalt\b[^:\n]*:\s*([\s\S]{1,250}?)(?=\n\s*\n|$)/gi,
 
   // Verantwortlicher im Sinne von § 5 TMG
-  /\bverantwortlich\w*\s+im\s+sinne\s+von\s+§?\s*5\s*tmg\b\s*:?\s*([\s\S]{1,250}?)(?=\n|$)/gi,
-  /\bverantwortlich\s+gemäß\s+§\s*5\s*tmg\b\s*:?\s*([\s\S]{1,250}?)(?=\n|$)/gi,
+  /\bverantwortlich\w*\s+im\s+sinne\s+von\s+§?\s*5\s*tmg\b\s*:?\s*([\s\S]{1,250}?)(?=\n\s*\n|$)/gi,
+  /\bverantwortlich\s+gemäß\s+§\s*5\s*tmg\b\s*:?\s*([\s\S]{1,250}?)(?=\n\s*\n|$)/gi,
   
   // Angaben gemäß § 5 TMG (mit unsichtbaren Zeichen und mehreren Umbrüchen)
   /\bangaben\s+gemäß\s+§\s*5\s*tmg\b\s*:?[\s\u200B-\u200D\uFEFF]*([\s\S]{1,250}?)(?=\n\s*\n|$)/gi,

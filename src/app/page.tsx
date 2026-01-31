@@ -7,12 +7,14 @@ interface BusinessResult {
   stadt: string;
   branche: string;
   name?: string;
-  adresse?: string;
   telefon?: string;
   website?: string;
   email?: string;
   owner?: string;
   status?: string;
+  rating?: number;
+  reviews?: number;
+  hours?: string;
 }
 
 type Language = 'de' | 'en';
@@ -40,6 +42,11 @@ const translations = {
     email: 'Email',
     owner: 'Geschäftsführer',
     status: 'Status',
+    rating: 'Bewertung',
+    reviews: 'Anzahl Bewertungen',
+    hours: 'Öffnungszeiten',
+    phone: 'Telefon',
+    website: 'Website',
     howItWorks: 'So funktioniert es:',
     step1: 'Excel- oder CSV-Datei mit den Spalten "Stadt" und "Branche" hochladen',
     step2: 'Einen Kaffee holen',
@@ -72,6 +79,11 @@ const translations = {
     email: 'Email',
     owner: 'Owner',
     status: 'Status',
+    rating: 'Rating',
+    reviews: 'Reviews',
+    hours: 'Opening Hours',
+    phone: 'Phone',
+    website: 'Website',
     howItWorks: 'How it works:',
     step1: 'Upload Excel or CSV file with columns "city" and "industry"',
     step2: 'Get a coffee',
@@ -116,7 +128,7 @@ export default function BusinessScraper() {
   const [searchEmail, setSearchEmail] = useState(true);
   const [searchOwner, setSearchOwner] = useState(true);
   const [country, setCountry] = useState('de');
-  const [maxBusinesses, setMaxBusinesses] = useState<number | 'max'>(100);
+  const [maxBusinesses, setMaxBusinesses] = useState<number | 'max' | ''>(60);
 
   const t = translations[language];
 
@@ -179,7 +191,7 @@ export default function BusinessScraper() {
     formData.append('searchEmail', String(searchEmail));
     formData.append('searchOwner', String(searchOwner));
     formData.append('country', country);
-    formData.append('maxBusinesses', String(maxBusinesses));
+    formData.append('maxBusinesses', String(!maxBusinesses ? 20 : (maxBusinesses === 'max' ? 100000 : maxBusinesses)));
 
     try {
       const response = await fetch('/api/scrape', {
@@ -251,16 +263,18 @@ export default function BusinessScraper() {
     if (!results) return;
 
     const csv = [
-      [t.city, t.industry, t.name, 'Address', 'Phone', 'Website', t.email, t.owner, t.status].join(','),
+      [t.city, t.industry, t.name, t.phone, t.website, t.email, t.owner, t.rating, t.reviews, t.hours, t.status].join(','),
       ...results.map((r: BusinessResult) => [
         r.stadt,
         r.branche,
         r.name || '',
-        r.adresse || '',
         r.telefon || '',
         r.website || '',
         r.email || '',
         r.owner || '',
+        r.rating?.toString() || '',
+        r.reviews?.toString() || '',
+        r.hours || '',
         r.status || ''
       ].map(field => `"${String(field).replace(/"/g, '""')}"`).join(','))
     ].join('\n');
@@ -397,19 +411,26 @@ export default function BusinessScraper() {
                 <div className="flex gap-2">
                   <input
                     type="number"
-                    min="20"
+                    min="0"
                     step="20"
                     value={maxBusinesses === 'max' ? '' : maxBusinesses}
                     onChange={(e) => {
                       const value = e.target.value;
-                      setMaxBusinesses(value === '' ? 'max' : parseInt(value) || 20);
+                      if (value === '') {
+                        setMaxBusinesses('');
+                      } else {
+                        setMaxBusinesses(parseInt(value) || '');
+                      }
                     }}
-                    disabled={maxBusinesses === 'max'}
-                    className="w-24 px-3 py-2 border border-gray-300 rounded-lg text-sm disabled:bg-gray-100 disabled:cursor-not-allowed"
-                    placeholder="20, 40, 60..."
+                    className={`w-24 px-3 py-2 border rounded-lg text-sm transition-colors ${
+                      maxBusinesses === 'max' 
+                        ? 'border-indigo-300 bg-indigo-50 text-indigo-700 font-medium placeholder-indigo-400' 
+                        : 'border-gray-300'
+                    }`}
+                    placeholder={maxBusinesses === 'max' ? 'Max' : "20, 60..."}
                   />
                   <button
-                    onClick={() => setMaxBusinesses(maxBusinesses === 'max' ? 100 : 'max')}
+                    onClick={() => setMaxBusinesses(maxBusinesses === 'max' ? 60 : 'max')}
                     className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                       maxBusinesses === 'max'
                         ? 'bg-indigo-600 text-white hover:bg-indigo-700'
@@ -501,6 +522,10 @@ export default function BusinessScraper() {
                       <th className="px-4 py-2 text-left font-semibold">{t.city}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.industry}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.name}</th>
+                      <th className="px-4 py-2 text-left font-semibold">{t.phone}</th>
+                      <th className="px-4 py-2 text-left font-semibold">{t.website}</th>
+                      <th className="px-4 py-2 text-left font-semibold">{t.rating}</th>
+                      <th className="px-4 py-2 text-left font-semibold">{t.hours}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.email}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.owner}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.status}</th>
@@ -512,6 +537,34 @@ export default function BusinessScraper() {
                         <td className="px-4 py-2">{r.stadt}</td>
                         <td className="px-4 py-2">{r.branche}</td>
                         <td className="px-4 py-2">{r.name || '-'}</td>
+                        <td className="px-4 py-2">{r.telefon || '-'}</td>
+                        <td className="px-4 py-2">
+                          {r.website ? (
+                            <a href={r.website} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                              Website
+                            </a>
+                          ) : '-'}
+                        </td>
+                        <td className="px-4 py-2">
+                          {r.rating ? (
+                            <div className="flex items-center gap-1">
+                              <span className="text-yellow-600">⭐</span>
+                              <span className="font-medium">{r.rating.toFixed(1)}</span>
+                              {r.reviews && <span className="text-gray-500 text-xs">({r.reviews})</span>}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">-</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2 max-w-xs">
+                          {r.hours ? (
+                            <span className="text-sm text-gray-700" title={r.hours}>
+                              {r.hours.length > 50 ? r.hours.substring(0, 50) + '...' : r.hours}
+                            </span>
+                          ) : (
+                            <span className="text-gray-400">-</span>
+                          )}
+                        </td>
                         <td className="px-4 py-2">
                           {r.email ? (
                             <span className="text-green-600 font-medium">{r.email}</span>
