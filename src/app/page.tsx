@@ -145,6 +145,22 @@ export default function BusinessScraper() {
   const [activeTab, setActiveTab] = useState<'scraper' | 'history' | 'settings'>('scraper');
   const [history, setHistory] = useState<any[]>([]);
 
+  const [autoScroll, setAutoScroll] = useState(true);
+  const tableContainerRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (autoScroll && tableContainerRef.current) {
+      const container = tableContainerRef.current;
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [results, autoScroll]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    const isAtBottom = Math.abs(container.scrollHeight - container.scrollTop - container.clientHeight) < 10;
+    setAutoScroll(isAtBottom);
+  };
+
   const t = translations[language];
 
   // Detect browser language after component mounts (client-side only)
@@ -368,7 +384,7 @@ export default function BusinessScraper() {
 
   return (
     <div className="min-h-screen bg-linear-to-br from-blue-50 to-indigo-100 p-8">
-      <div className="max-w-4xl mx-auto">
+      <div className="w-full max-w-[95%] mx-auto">
         <div className="bg-white rounded-2xl shadow-xl p-8">
           <div className="flex justify-between items-start mb-2">
             <h1 className="text-3xl font-bold text-gray-800">{t.title}</h1>
@@ -778,7 +794,11 @@ export default function BusinessScraper() {
                 </button>
               </div>
               
-              <div className="overflow-auto max-h-96 border rounded-lg">
+              <div 
+                className="overflow-auto max-h-[60vh] border rounded-lg"
+                ref={tableContainerRef}
+                onScroll={handleScroll}
+              >
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 sticky top-0">
                     <tr>
