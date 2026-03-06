@@ -92,7 +92,7 @@ export function getDomainWithoutTLD(fullDomain: string): string {
 
 // Country-specific imprint page patterns
 const imprintPatterns: Record<string, RegExp> = {
-  de: /impressum|imprint|rechtliche|rechtliches|kontakt/i,
+  de: /impressum|imprint|geschaeftsbedingungen|rechtliche|rechtliches|kontakt/i,
   at: /impressum|imprint|offenlegung|medieninhaber|kontakt/i,
   ch: /impressum|imprint|kontakt|herausgeber/i,
   us: /about|contact|legal|privacy|terms/i,
@@ -520,7 +520,8 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
             if (!link) return false;
             try {
               const u = new URL(link);
-              const sameDomain = u.hostname.replace(/^www\./, '') === domain;
+              const { domainToUnicode } = require('node:url');
+              const sameDomain = domainToUnicode(u.hostname).replace(/^www\./, '') === domain;
               const isHomepageVariant = homepageCanonicalUrl ? link === homepageCanonicalUrl : false;
               const isBinaryFile = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|zip|rar|tar\.gz|gz|7z|png|jpe?g|gif|svg|webp|ico|mp4|mp3|avi|mov|wmv)$/i.test(u.pathname);
               return sameDomain && !visited.has(link) && !isHomepageVariant && !isBinaryFile;
@@ -602,6 +603,7 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
 
   logger(`🕷️  Starting scraping for: ${websiteUrl} (email: ${searchEmail}, owner: ${searchOwner}, country: ${country})`);
 
+  const { domainToUnicode } = require('node:url');
   let baseUrl: URL;
   try {
     baseUrl = new URL(websiteUrl);
@@ -609,7 +611,7 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
     logger(`❌ Invalid URL: ${websiteUrl}`);
     return result;
   }
-  const domain = baseUrl.hostname.replace(/^www\./, '');
+  const domain = domainToUnicode(baseUrl.hostname).replace(/^www\./, '');
 
     const doScrape = async (seed: ScrapeResult): Promise<ScrapeResult> => {
      const deadlineTs = Date.now() + attemptTimeoutMs;

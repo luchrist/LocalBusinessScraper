@@ -60,7 +60,8 @@ export async function GET(
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(csvData);
     XLSX.utils.book_append_sheet(wb, ws, 'Results');
-    const csvBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'csv' });
+    const csvBufferData = XLSX.write(wb, { type: 'buffer', bookType: 'csv' });
+    const csvBuffer = Buffer.concat([Buffer.from('\xEF\xBB\xBF', 'binary'), csvBufferData]);
 
     db.close();
     db = null;

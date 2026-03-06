@@ -109,9 +109,9 @@ export async function POST(request: NextRequest) {
       const file = formData.get('file') as File;
       const searchEmail = formData.get('searchEmail') === 'true';
       const searchOwner = formData.get('searchOwner') === 'true';
-      const country = (formData.get('country') as string) || 'de';
       const singleWorker = formData.get('singleWorker') === 'true';
-      const workerCountRaw = parseInt(formData.get('workerCount') as string) || 0;
+      const country = (formData.get('country') as string) || 'de';
+      const enrichmentWorkerCountRaw = parseInt(formData.get('enrichmentWorkerCount') as string) || 0;
       const maxBusinessesStr = formData.get('maxBusinesses') as string;
       const maxBusinesses = maxBusinessesStr === 'max' ? Infinity : parseInt(maxBusinessesStr) || Infinity;
 
@@ -157,11 +157,19 @@ export async function POST(request: NextRequest) {
       }
 
       logger.log(`📁 File received: ${file.name} (${file.size} bytes)`);
-      logger.log(`⚙️  Options: searchEmail=${searchEmail}, searchOwner=${searchOwner}, country=${country}, maxBusinesses=${maxBusinesses}, singleWorker=${singleWorker}`);
+      logger.log(`⚙️  Options: searchEmail=${searchEmail}, searchOwner=${searchOwner}, country=${country}, maxBusinesses=${maxBusinesses}`);
 
-      // Parse Excel file
+      // Parse Excel or CSV file
       const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer);
+      let workbook;
+      
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        const text = new TextDecoder('utf-8').decode(buffer);
+        workbook = XLSX.read(text, { type: 'string' });
+      } else {
+        workbook = XLSX.read(buffer);
+      }
+      
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const rawData = XLSX.utils.sheet_to_json(sheet);
       logger.log(`📊 Excel file parsed: ${rawData.length} rows found`);
@@ -186,7 +194,7 @@ export async function POST(request: NextRequest) {
       // SQLite session – scraping results written to disk immediately, never piling up in RAM
       const sessionId = newSessionId();
       const db = openDb(sessionId);
-      createSession(db, { sessionId, workerCount: workerCountRaw || 2, searchEmail, searchOwner, country });
+      createSession(db, { sessionId, workerCount: 1, searchEmail, searchOwner, country });
       await sendProgress({ type: 'session', sessionId });
 
       const seenPlaceIds = new Set<string>();
@@ -242,7 +250,7 @@ export async function POST(request: NextRequest) {
 
       // ── Unified pipeline: per-row decision API (effectiveMax ≤ 60) vs Scraping (> 60) ──
       const hasScrapingRows = data.some(row => (row.max_results ?? maxBusinesses) > 60);
-      const workerCount = singleWorker ? 1 : ScraperPool.recommendedWorkerCount(workerCountRaw || undefined);
+      const workerCount = 1; // Always 1 Maps scraper worker since scraping is not done in parallel globally
       const pool = new ScraperPool();
       if (hasScrapingRows) {
         logger.log(`[Pool] ${workerCount} Maps worker(s) initialised – some rows will use scraping`);
@@ -252,29 +260,36 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      // ── Sort searches into a single Task array to run sequentially ──
+      const allTasks: (() => Promise<void>)[] = [];
+
       for (const row of data) {
-        if (isAborted) break;
         const stadt = row.stadt!;
         const branche = row.branche!;
         const effectiveMax = (row.max_results != null && row.max_results > 0)
           ? row.max_results
           : maxBusinesses;
 
-        searchCount++;
-        const mode = effectiveMax <= 60 ? 'API' : 'Scraping';
-        logger.log(`🔍 [${mode}] "${branche}" in "${stadt}" (max: ${effectiveMax === Infinity ? '∞' : effectiveMax})`);
+        const isApi = effectiveMax <= 60;
 
-        await sendProgress({
-          type: 'progress',
-          message: `[${mode}] "${branche}" in "${stadt}"`,
-          current: processedBusinesses,
-          total: totalBusinessesFound,
-          searchCount,
-          totalSearches,
-        });
+        const task = async () => {
+          if (isAborted) return;
 
-        if (effectiveMax <= 60) {
-          // ── API PATH ────────────────────────────────────────────────────────
+          searchCount++;
+          const mode = isApi ? 'API' : 'Scraping';
+          logger.log(`🔍 [${mode}] "${branche}" in "${stadt}" (max: ${effectiveMax === Infinity ? '∞' : effectiveMax})`);
+
+          await sendProgress({
+            type: 'progress',
+            message: `[${mode}] "${branche}" in "${stadt}"`,
+            current: processedBusinesses,
+            total: totalBusinessesFound,
+            searchCount,
+            totalSearches,
+          });
+
+          if (isApi) {
+            // ── API PATH ────────────────────────────────────────────────────────
           const places = await searchPlaces(stadt, branche, effectiveMax, sendProgress);
           logger.log(`✅ Found ${places.length} places for "${branche}" in "${stadt}"`);
 
@@ -430,14 +445,20 @@ export async function POST(request: NextRequest) {
           ];
           const gbRam = os.totalmem() / 1024 ** 3;
           let enrichmentConcurrency = 1;
-          if (gbRam > 16) enrichmentConcurrency = 3;
-          else if (gbRam > 8) enrichmentConcurrency = 2;
+          if (enrichmentWorkerCountRaw > 0) {
+            enrichmentConcurrency = enrichmentWorkerCountRaw;
+          } else {
+            if (gbRam > 16) enrichmentConcurrency = 3;
+            else if (gbRam > 8) enrichmentConcurrency = 2;
+          }
 
-          await runWithLimit(tasks, singleWorker ? 1 : enrichmentConcurrency);
+          if (singleWorker) enrichmentConcurrency = 1;
+
+          await runWithLimit(tasks, enrichmentConcurrency);
         } else if (mapsPaused) {
           // Maps is blocked – skip scraping rows, enrichment for prior results is already done
           logger.log(`[Scraping] Skipping "${branche}" in "${stadt}" – Maps is paused (block detected)`);
-          continue;        } else {
+          return;        } else {
           // ── SCRAPING PATH ──────────────────────────────────────────────────
           // Create a job row in SQLite so place FK is satisfied
           const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results });
@@ -447,6 +468,17 @@ export async function POST(request: NextRequest) {
             await scraper.search(stadt, branche);
 
             let scraped = 0;
+            const activeTasks = new Set<Promise<void>>();
+            const gbRam = os.totalmem() / 1024 ** 3;
+            let enrichmentConcurrency = 1;
+            if (enrichmentWorkerCountRaw > 0) {
+              enrichmentConcurrency = enrichmentWorkerCountRaw;
+            } else {
+              if (gbRam > 16) enrichmentConcurrency = 3;
+              else if (gbRam > 8) enrichmentConcurrency = 2;
+            }
+            if (singleWorker) enrichmentConcurrency = 1;
+
             for await (const place of scraper.scrape(request.signal)) {
               if (isAborted) break;
               if (effectiveMax !== Infinity && scraped >= effectiveMax) break;
@@ -471,33 +503,7 @@ export async function POST(request: NextRequest) {
                 totalSearches,
               });
 
-              let email: string | null = null;
-              let owner: string | null = null;
-              let ownerSalutations: string | null = null;
-              let ownerFirstNames: string | null = null;
-              let ownerLastNames: string | null = null;
-              let enrichStatus = 'no_website';
-              if (place.website && (searchEmail || searchOwner)) {
-                try {
-                  const info = await findContactInfo(context, place.website, (msg) => logger.log(msg), {
-                    searchEmail, searchOwner, country, businessName: place.name, industry: branche,
-                  });
-                  email = info.email;
-                  owner = info.owner;
-                  ownerFirstNames = info.ownerFirstNames;
-                  ownerLastNames = info.ownerLastNames;
-                  enrichStatus = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
-                } catch (err) {
-                  logger.error(`[Enrich] Error ${place.website}:`, err);
-                  enrichStatus = 'error';
-                }
-              } else if (!place.website) {
-                enrichStatus = 'no_website';
-              } else {
-                enrichStatus = 'skipped';
-              }
-
-              // Write to SQLite (disk) – not to a RAM array
+              // Write to SQLite (disk) immediately so the placeholder exists
               const placeKey2 = place.placeKey || `${place.name}|${place.address ?? ''}`;
               const dbId = insertPlace(db, sessionId, jobId, {
                 name: place.name, website: place.website ?? undefined,
@@ -507,33 +513,76 @@ export async function POST(request: NextRequest) {
                 address: place.address ?? undefined, placeKey: placeKey2,
                 exactIndustry: (place as any).exactIndustry ?? undefined,
               });
-              updatePlaceEnriched(db, dbId, {
-                email: email || null,
-                owner: owner || null,
-                ownerSalutations: ownerSalutations || null,
-                ownerFirstNames: ownerFirstNames || null,
-                ownerLastNames: ownerLastNames || null,
-                status: enrichStatus as EnrichStatus,
-              });
 
-              const scrapingResult: BusinessResult = {
-                stadt, branche, name: place.name, adresse: place.address ?? undefined,
-                telefon: place.phone ?? undefined, website: place.website ?? undefined,
-                email: email || undefined,
-                owner: owner || undefined,
-                ownerSalutations: ownerSalutations || undefined,
-                ownerFirstNames: ownerFirstNames || undefined,
-                ownerLastNames: ownerLastNames || undefined,
-                status: enrichStatus, hours: place.hours ?? undefined,
-                rating: place.rating ?? undefined, reviews: place.reviews ?? undefined,
-              };
-              processedBusinesses++;
-              await sendProgress({
-                type: 'result', result: scrapingResult,
-                current: processedBusinesses, total: totalBusinessesFound,
-              });
               scraped++;
+
+              const processPlace = async () => {
+                let email: string | null = null;
+                let owner: string | null = null;
+                let ownerSalutations: string | null = null;
+                let ownerFirstNames: string | null = null;
+                let ownerLastNames: string | null = null;
+                let enrichStatus = 'no_website';
+
+                if (place.website && (searchEmail || searchOwner)) {
+                  try {
+                    const info = await findContactInfo(context, place.website, (msg) => logger.log(msg), {
+                      searchEmail, searchOwner, country, businessName: place.name, industry: branche,
+                    });
+                    email = info.email;
+                    owner = info.owner;
+                    ownerFirstNames = info.ownerFirstNames;
+                    ownerLastNames = info.ownerLastNames;
+                    enrichStatus = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
+                  } catch (err) {
+                    logger.error(`[Enrich] Error ${place.website}:`, err);
+                    enrichStatus = 'error';
+                  }
+                } else if (!place.website) {
+                  enrichStatus = 'no_website';
+                } else {
+                  enrichStatus = 'skipped';
+                }
+
+                updatePlaceEnriched(db, dbId, {
+                  email: email || null,
+                  owner: owner || null,
+                  ownerSalutations: ownerSalutations || null,
+                  ownerFirstNames: ownerFirstNames || null,
+                  ownerLastNames: ownerLastNames || null,
+                  status: enrichStatus as EnrichStatus,
+                });
+
+                const scrapingResult: BusinessResult = {
+                  stadt, branche, name: place.name, adresse: place.address ?? undefined,
+                  telefon: place.phone ?? undefined, website: place.website ?? undefined,
+                  email: email || undefined,
+                  owner: owner || undefined,
+                  ownerSalutations: ownerSalutations || undefined,
+                  ownerFirstNames: ownerFirstNames || undefined,
+                  ownerLastNames: ownerLastNames || undefined,
+                  status: enrichStatus, hours: place.hours ?? undefined,
+                  rating: place.rating ?? undefined, reviews: place.reviews ?? undefined,
+                };
+                
+                processedBusinesses++;
+                await sendProgress({
+                  type: 'result', result: scrapingResult,
+                  current: processedBusinesses, total: totalBusinessesFound,
+                });
+              };
+
+              const taskPromise = processPlace();
+              activeTasks.add(taskPromise);
+              taskPromise.finally(() => activeTasks.delete(taskPromise));
+
+              if (activeTasks.size >= enrichmentConcurrency) {
+                await Promise.race(activeTasks);
+              }
             }
+
+            // Wait for remaining enrichments of this keyword
+            await Promise.all(activeTasks);
           } catch (e) {
             if (e instanceof BlockDetectionError) {
               mapsPaused = true;
@@ -559,10 +608,19 @@ export async function POST(request: NextRequest) {
             pool.release(worker);
           }
         }
+        };
+
+        allTasks.push(task);
       }
 
-      if (hasScrapingRows) await pool.close();
-      
+      // Execute sequentially (no parallel API / Scraping)
+      await runWithLimit(allTasks, 1);
+
+      if (hasScrapingRows) {
+        logger.log('[Pool] All tasks finished. Shutting down Maps worker pool to free RAM.');
+        await pool.close();
+      }
+
       updateSessionTotalJobs(db, sessionId, processedBusinesses);
       closeDb(sessionId);
 

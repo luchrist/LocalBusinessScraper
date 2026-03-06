@@ -77,7 +77,7 @@ export async function GET(request: NextRequest) {
 
       // ── Maps browser pool ───────────────────────────────────────────────
       const pool = new ScraperPool();
-      await pool.initialize(worker_count);
+      await pool.initialize(1); // Force 1 Maps worker as scraping is no longer parallelized
       request.signal.addEventListener('abort', async () => {
         updateSessionStatus(db, sessionId, 'paused');
         await pool.close().catch(() => {});
@@ -228,9 +228,9 @@ export async function GET(request: NextRequest) {
 
       // ── Run all loops ────────────────────────────────────────────────────
       await Promise.all([
-        Promise.all(Array.from({ length: worker_count }, () => mapsWorkerLoop()))
+        Promise.all(Array.from({ length: 1 }, () => mapsWorkerLoop())) // Force 1 Maps worker loop
           .then(() => pool.close()),
-        Promise.all(Array.from({ length: 5 }, () => enrichWorkerLoop()))
+        Promise.all(Array.from({ length: Math.max(2, worker_count) }, () => enrichWorkerLoop())) // Parallel Enrichment
           .then(() => { pipelineDone = true; }),
         streamLoop(),
       ]);

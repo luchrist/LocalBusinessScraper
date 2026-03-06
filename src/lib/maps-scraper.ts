@@ -419,7 +419,17 @@ export class GoogleMapsScraper {
             try {
                 const link = await this.page.$('a[data-item-id="authority"]');
                 if (link) {
-                    result.website = await link.getAttribute('href') || undefined;
+                    const href = await link.getAttribute('href');
+                    if (href) {
+                        try {
+                            const urlObj = new URL(href);
+                            const { domainToUnicode } = require('node:url');
+                            urlObj.hostname = domainToUnicode(urlObj.hostname);
+                            result.website = urlObj.toString();
+                        } catch {
+                            result.website = href;
+                        }
+                    }
                 }
             } catch { }
 
@@ -429,7 +439,10 @@ export class GoogleMapsScraper {
                 if (phoneBtn) {
                     const label = await phoneBtn.getAttribute('aria-label');
                     if (label) {
-                        result.phone = label.replace(/^Phone:\s*/i, '').trim();
+                        // Google Maps often surrounds text with invisible bidirectional characters (e.g. \u202A).
+                        // That prevents the ^ anchor in Regex from cleanly matching the start of the string.
+                        let cleanLabel = label.replace(/[\u200B-\u200D\uFEFF\u202A-\u202E]/g, '');
+                        result.phone = cleanLabel.replace(/^(Phone|Telefon):\s*/i, '').trim();
                     }
                 }
             } catch { }
@@ -442,37 +455,41 @@ export class GoogleMapsScraper {
                 ).catch(() => null);
 
                 if (ratingText) {
-                    result.rating = parseFloat(ratingText);
+                    result.rating = parseFloat(ratingText.replace(',', '.'));
                 }
 
                 const reviewLabel = await this.page.$eval(
-                    '.F7nice span[aria-label*="reviews"]',
+                    '.F7nice span[aria-label*="reviews" i], .F7nice span[aria-label*="Rezensionen" i]',
                     el => el.getAttribute('aria-label')
                 ).catch(() => null);
 
                 if (reviewLabel) {
-                    const match = reviewLabel.match(/(\d[\d,]*)/);
+                    const match = reviewLabel.match(/(\d[\d,.]*)/);
                     if (match) {
-                        result.reviews = parseInt(match[0].replace(/,/g, ''));
+                        result.reviews = parseInt(match[0].replace(/[,.]/g, ''));
                     }
                 }
             } catch { }
 
             // Price Extractions
             try {
-                // The price info is usually near the rating or in a general textual description right below the title.
-                // It either contains € symbols, or numbers with €. We can look for spans containing '€'.
                 const spans = await this.page.$$eval('span', els => els.map(e => e.textContent || ''));
                 for (const text of spans) {
-                    if (text.includes('€')) {
-                        // verify it looks like a price info
-                        if (/€+|€\s*\d+|\d+\s*-\s*\d+\s*€|mehr als\s*\d+\s*€|more than/i.test(text)) {
-                            result.price = text.trim();
+                    let cleanText = text.replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
+                    // Clean up leading dots or whitespace (e.g. "· €€")
+                    cleanText = cleanText.replace(/^[·•\-\s]+/, '').trim();
+                    if (cleanText.includes('€')) {
+                        // If it's a relatively short text snippet containing at least one digit or multiple € signs
+                        if (cleanText.length < 40 && (/\d/.test(cleanText) || /€{2,}/.test(cleanText))) {
+                            result.price = cleanText;
+                            logger.log(`[Maps] Extracted price: "${result.price}"`);
                             break;
                         }
                     }
                 }
-            } catch { }
+            } catch (e) {
+                logger.error('[Maps] Error extracting price:', e);
+            }
 
             // Exact Industry
             try {
@@ -487,40 +504,66 @@ export class GoogleMapsScraper {
 
             // Hours
             try {
-                // Try to expand hours first
-                const expandBtn = await this.page.$('button[aria-label*="open hours"], span[aria-label*="open hours"]');
+                // Try to expand hours first, handle both English and German labels
+                const expandBtn = await this.page.$('button[aria-label*="open hours" i], span[aria-label*="open hours" i], span[aria-label*="Show open hours" i], div[aria-label*="hours" i], button[aria-label*="Öffnungszeiten" i], span[aria-label*="Öffnungszeiten" i], div[aria-label*="Öffnungszeiten" i], button[data-item-id="openhours"]');
                 if (expandBtn) {
                     await expandBtn.click();
-                    await this.randomDelay(300, 600);
+                    await this.randomDelay(400, 800);
 
-                    // Parse hours table
-                    const rows = await this.page.$$('table.eK4R0e tr.y0skZc');
+                    // Parse hours table - making selectors more robust in case class names changed
+                    const rows = await this.page.$$('table tr');
                     if (rows.length > 0) {
                         const hoursList: string[] = [];
                         for (const row of rows) {
                             try {
-                                const day = await row.$eval('td.ylH6lf', el => el.textContent?.trim()).catch(() => '');
-                                const time = await row.$eval('td.mxowUb', el => el.getAttribute('aria-label')).catch(() => '');
-
-                                if (day && time) {
-                                    hoursList.push(`${day}: ${time}`);
+                                const tds = await row.$$('td');
+                                if (tds.length >= 2) {
+                                    const day = await tds[0].textContent();
+                                    const time = (await tds[1].getAttribute('aria-label')) || (await tds[1].textContent());
+                                    
+                                    if (day && time && day.trim() && time.trim()) {
+                                        hoursList.push(`${day.trim()}: ${time.trim()}`);
+                                    }
                                 }
                             } catch { }
                         }
                         if (hoursList.length > 0) {
                             result.hours = hoursList.join(' | ');
+                            logger.log(`[Maps] Extracted hours (table): ${result.hours}`);
+                        }
+                    }
+                    
+                    if (!result.hours) {
+                        // generic table fallback
+                        const hoursTable = await this.page.$('table');
+                        if (hoursTable) {
+                            const hoursText = await hoursTable.innerText();
+                            if (hoursText && hoursText.length > 10) {
+                                result.hours = hoursText.replace(/\n/g, ', ');
+                                logger.log(`[Maps] Extracted hours (presentation table): ${result.hours}`);
+                            }
                         }
                     }
                 }
 
-                // Fallback to button label
+                // Fallback to button/element label
                 if (!result.hours) {
-                    const hoursBtn = await this.page.$('button[data-item-id="openhours"]');
+                    const hoursBtn = await this.page.$('button[data-item-id="openhours"], div[data-item-id="openhours"], button[aria-label*="Öffnungszeiten" i], button[aria-label*="hours" i]');
                     if (hoursBtn) {
-                        result.hours = await hoursBtn.getAttribute('aria-label') || undefined;
+                        const rawHours = (await hoursBtn.getAttribute('aria-label')) || (await hoursBtn.innerText());
+                        if (rawHours) {
+                            result.hours = rawHours.replace(/\n/g, ' ').trim();
+                            logger.log(`[Maps] Extracted hours (button fallback): ${result.hours}`);
+                        }
                     }
                 }
-            } catch { }
+                
+                if (!result.hours) {
+                    logger.log(`[Maps] Could not extract hours for ${name}`);
+                }
+            } catch (e) {
+                logger.error('[Maps] Error extracting hours:', e);
+            }
 
             // Address
             try {
@@ -528,7 +571,9 @@ export class GoogleMapsScraper {
                 if (addressBtn) {
                     const label = await addressBtn.getAttribute('aria-label');
                     if (label) {
-                        result.address = label.replace(/^Address:\s*/i, '').trim();
+                        // Strip invisible characters to ensure clean replacement and db storage
+                        let cleanLabel = label.replace(/[\u200B-\u200D\uFEFF\u202A-\u202E]/g, '');
+                        result.address = cleanLabel.replace(/^(Address|Adresse):\s*/i, '').trim();
                     }
                 }
             } catch { }

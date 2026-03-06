@@ -13,9 +13,16 @@ interface ApiKey {
 interface SettingsTabProps {
   singleWorker: boolean;
   setSingleWorker: (val: boolean) => void;
+  enrichmentWorkerCount: number;
+  setEnrichmentWorkerCount: (val: number) => void;
 }
 
-export default function SettingsTab({ singleWorker, setSingleWorker }: SettingsTabProps) {
+export default function SettingsTab({ 
+  singleWorker,
+  setSingleWorker,
+  enrichmentWorkerCount,
+  setEnrichmentWorkerCount
+}: SettingsTabProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [newKey, setNewKey] = useState('');
   const [loading, setLoading] = useState(true);
@@ -182,6 +189,33 @@ export default function SettingsTab({ singleWorker, setSingleWorker }: SettingsT
             ))}
           </div>
         )}
+      </div>
+
+       <div className="border-t pt-6 mt-8">
+        <h3 className="text-lg font-semibold mb-3 text-gray-700">Performance Settings</h3>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg border border-gray-100">
+            <div>
+              <div className="font-medium text-gray-800">Enrichment Worker</div>
+              <div className="text-sm text-gray-500">Number of parallel tasks for Email & Owner scraping.<br/>(Auto: RAM &le;8 GB &rarr; 1, &le;16 GB &rarr; 2, &gt;16 GB &rarr; 3)</div>
+            </div>
+            <div className="flex gap-1">
+              {[0, 1, 2, 3, 4, 5].map(n => (
+                <button
+                  key={n}
+                  onClick={() => setEnrichmentWorkerCount(n)}
+                  className={`px-3 h-9 rounded-lg text-sm font-semibold transition-colors ${
+                    enrichmentWorkerCount === n
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  {n === 0 ? 'Auto' : n}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
 
        <div className="border-t pt-6 mt-8">
