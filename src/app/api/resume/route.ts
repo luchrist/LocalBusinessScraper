@@ -121,6 +121,7 @@ export async function GET(request: NextRequest) {
                 name: place.name, website: place.website, phone: place.phone,
                 rating: place.rating, reviews: place.reviews,
                 hours: place.hours, address: place.address, placeKey,
+                exactIndustry: (place as any).exactIndustry,
               });
             }
             markJobDone(db, jobId, 'done');

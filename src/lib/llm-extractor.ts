@@ -168,7 +168,24 @@ JSON Response:`;
         return null;
       }
 
-      if (!result.names || result.names === "null" || result.names.length < 3) {
+      if (!result.names || result.names.trim().toLowerCase() === "null" || result.names.trim().toLowerCase() === "none") {
+        logger.log(`   🚫 LLM returned no valid names ("${result.names}"). Acting as not found.`);
+        return null;
+      }
+
+      // Remove literal "null" or "none" that the LLM might have included as part of a list
+      let cleanedNames = result.names
+        .replace(/\bnull\b/ig, '')
+        .replace(/\bnone\b/ig, '');
+      
+      // Clean up stray commas or multiple spaces
+      cleanedNames = cleanedNames
+        .split(',')
+        .map((n: string) => n.trim())
+        .filter(Boolean)
+        .join(', ');
+
+      if (!cleanedNames || cleanedNames.length < 3) {
         return null;
       }
       
@@ -176,11 +193,11 @@ JSON Response:`;
       const forbiddenTerms = [
         'gmbh', 'ug', 'ag', 'limited', 'ltd', 'inc', 'corp', 'co.', 'e.v.', 'ev', 'club', 'verein', 'vfr', 'sv', 'fc', 'fv', 'restaurant', 'hotel', 'cafe', 'bar', 'bistro', 'praxis', 'kanzlei', 'shop', 'store', 'markt', 'service', 'team'
       ];
-      const lowerName = result.names.toLowerCase();
+      const lowerName = cleanedNames.toLowerCase();
 
       // Check for years (e.g. 2024, 2025)
       if (/\b(19|20)\d{2}\b/.test(lowerName)) {
-         logger.log(`   🚫 LLM returned a name with a year: "${result.names}". Discarding.`);
+         logger.log(`   🚫 LLM returned a name with a year: "${cleanedNames}". Discarding.`);
          return null;
       }
 
@@ -190,21 +207,21 @@ JSON Response:`;
       const pattern = `(?<!\\p{L})(${escapedTerms.join('|')})(?!\\p{L})`;
       
       if (new RegExp(pattern, 'iu').test(lowerName)) {
-         logger.log(`   🚫 LLM returned a business name/role instead of person: "${result.names}". Discarding.`);
+         logger.log(`   🚫 LLM returned a business name/role instead of person: "${cleanedNames}". Discarding.`);
          return null;
       }
 
       // Check against explicit business info if available
       if (businessInfo?.name && lowerName.includes(businessInfo.name.toLowerCase())) {
-          logger.log(`   🚫 LLM returned the business name itself: "${result.names}". Discarding.`);
+          logger.log(`   🚫 LLM returned the business name itself: "${cleanedNames}". Discarding.`);
           return null;
       }
       if (businessInfo?.industry && lowerName.includes(businessInfo.industry.toLowerCase())) {
-          logger.log(`   🚫 LLM returned the industry name: "${result.names}". Discarding.`);
+          logger.log(`   🚫 LLM returned the industry name: "${cleanedNames}". Discarding.`);
           return null;
       }
 
-      return result.names;
+      return cleanedNames;
     } catch (parseError) {
       logger.error("Failed to parse LLM JSON:", parseError);
       return null;

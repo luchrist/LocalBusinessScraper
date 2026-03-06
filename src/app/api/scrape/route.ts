@@ -48,6 +48,7 @@ interface Place {
   price?: string;
   rating?: number;
   reviews?: number;
+  exactIndustry?: string;
 }
 
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
@@ -118,6 +119,32 @@ export async function POST(request: NextRequest) {
       const minPrice = minPriceStr ? parseInt(minPriceStr) : undefined;
       const maxPriceStr = formData.get('maxPrice') as string;
       const maxPrice = maxPriceStr ? parseInt(maxPriceStr) : undefined;
+
+      const parsePriceAndMatch = (priceString?: string): boolean => {
+        if (!priceString) return true;
+        const rangeMatch = priceString.match(/(\d+)[^\d]+(\d+)/);
+        let bounds: { lowerBound: number, upperBound: number } | null = null;
+        if (rangeMatch) bounds = { lowerBound: parseInt(rangeMatch[1], 10), upperBound: parseInt(rangeMatch[2], 10) };
+        else {
+          const moreThanMatch = priceString.match(/(mehr als|more than|>|>|ab)\s*.*?(\d+)/i);
+          if (moreThanMatch) bounds = { lowerBound: parseInt(moreThanMatch[2], 10), upperBound: Infinity };
+          else {
+            const singleNumberMatch = priceString.match(/(\d+)/);
+            if (singleNumberMatch) { const val = parseInt(singleNumberMatch[1], 10); bounds = { lowerBound: val, upperBound: val }; }
+            else {
+              const euroCount = (priceString.match(/€/g) || []).length;
+              if (euroCount === 1) bounds = { lowerBound: 0, upperBound: 10 };
+              if (euroCount === 2) bounds = { lowerBound: 10, upperBound: 25 };
+              if (euroCount === 3) bounds = { lowerBound: 25, upperBound: 50 };
+              if (euroCount >= 4) bounds = { lowerBound: 50, upperBound: Infinity };
+            }
+          }
+        }
+        if (!bounds) return true;
+        if (minPrice !== undefined && bounds.upperBound < minPrice) return false;
+        if (maxPrice !== undefined && bounds.lowerBound > maxPrice) return false;
+        return true;
+      };
 
       // Clear logs at the start of a new scrape
       logger.clear();
@@ -255,7 +282,10 @@ export async function POST(request: NextRequest) {
           const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: jobMax });
 
           const uniquePlaces: Place[] = [];
-          for (const place of places) {
+          for (const place of places) {              if (!parsePriceAndMatch(place.price)) {
+                logger.log(`⚠️ Skipping ${place.name} due to price filter (${place.price})`);
+                continue;
+              }
             if (seenPlaceIds.has(place.id)) {
               logger.log(`♻️ Skipping duplicate place ID: ${place.name}`);
               continue;
@@ -303,6 +333,7 @@ export async function POST(request: NextRequest) {
               price: place.price,
               address: place.address,
               placeKey: placeKey,
+              exactIndustry: place.exactIndustry,
             });
 
             let email: string | null = null;
@@ -474,6 +505,7 @@ export async function POST(request: NextRequest) {
                 reviews: place.reviews ?? undefined, hours: place.hours ?? undefined,
                 price: (place as any).price ?? undefined,
                 address: place.address ?? undefined, placeKey: placeKey2,
+                exactIndustry: (place as any).exactIndustry ?? undefined,
               });
               updatePlaceEnriched(db, dbId, {
                 email: email || null,
@@ -585,6 +617,14 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
   let pageToken: string | undefined = undefined;
   let pageNumber = 1;
 
+  // Provide the price levels mapping to fake € labels for UI consistency
+  const priceLevelMap: Record<string, string> = {
+    'PRICE_LEVEL_INEXPENSIVE': '€',
+    'PRICE_LEVEL_MODERATE': '€€',
+    'PRICE_LEVEL_EXPENSIVE': '€€€',
+    'PRICE_LEVEL_VERY_EXPENSIVE': '€€€€'
+  };
+
   do {
     // ─── Key Management logic added ───
     let apiKey: string | null = null;
@@ -617,12 +657,11 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours,places.rating,places.userRatingCount,nextPageToken',
+          'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours,places.rating,places.userRatingCount,places.priceLevel,nextPageToken',
       },
       body: JSON.stringify(requestBody),
     });
 
-    // Count every call (including pagination)
     incrementApiKeyUsage(apiKey);
 
     if (!response.ok) {
@@ -649,7 +688,8 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
         website: place.websiteUri || '',
         rating: place.rating,
         reviews: place.userRatingCount,
-        hours
+          hours,
+          price: place.priceLevel ? priceLevelMap[place.priceLevel] : undefined
       };
     });
 

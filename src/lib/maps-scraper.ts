@@ -35,6 +35,7 @@ export interface PlaceResult {
     address?: string;
     placeKey?: string;   // dedup key extracted from Maps URL
     price?: string;
+    exactIndustry?: string;
 }
 
 export class GoogleMapsScraper {
@@ -183,28 +184,48 @@ export class GoogleMapsScraper {
 
         // Handle consent dialog efficiently
         try {
-            const consentHandled = await this.page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const target = buttons.find(b => {
-                    const text = (b.textContent || '').toLowerCase();
-                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                    return text.includes('accept') || text.includes('agree') || 
-                           aria.includes('accept') || aria.includes('agree') ||
-                           text.includes('reject all');
+            const consentRegex = /(accept all|agree|reject all|alle akzeptieren|alle ablehnen|zustimmen)/i;
+            const consentButton = this.page.locator('button').filter({ hasText: consentRegex }).first();
+            
+            if (await consentButton.isVisible({ timeout: 5000 })) {
+                await consentButton.scrollIntoViewIfNeeded();
+                await this.randomDelay(100, 300);
+                await consentButton.click({ delay: 100 });
+                await this.randomDelay(300, 600);
+            } else {
+                // Fallback via evaluate in case of complex shadow DOMs
+                const consentHandled = await this.page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const target = buttons.find(b => {
+                        const text = (b.textContent || '').toLowerCase();
+                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                        return text.includes('accept') || text.includes('agree') || 
+                               aria.includes('accept') || aria.includes('agree') ||
+                               text.includes('reject all') || text.includes('akzeptieren') ||
+                               text.includes('ablehnen') || text.includes('zustimmen');
+                    });
+
+                    if (target) {
+                        target.scrollIntoView({ block: 'center' });
+                        (target as HTMLElement).click();
+                        return true;
+                    }
+                    return false;
                 });
 
-                if (target) {
-                    (target as HTMLElement).click();
-                    return true;
+                if (consentHandled) {
+                    await this.randomDelay(300, 600);
                 }
-                return false;
-            });
-
-            if (consentHandled) {
-                await this.randomDelay(300, 600);
             }
         } catch (e) {
             // Consent already handled or not present
+        }
+
+        // Wait for search box to appear (might take a moment if consent redirect happens)
+        try {
+            await this.page.waitForSelector('#searchboxinput, input[name="q"]', { state: 'visible', timeout: 15000 });
+        } catch {
+            // we will just try our manual strategies next
         }
 
         // Find search box with multiple strategies
@@ -449,6 +470,17 @@ export class GoogleMapsScraper {
                             result.price = text.trim();
                             break;
                         }
+                    }
+                }
+            } catch { }
+
+            // Exact Industry
+            try {
+                const categoryBtn = await this.page.$('button[jsaction*="category"]');
+                if (categoryBtn) {
+                    const text = await categoryBtn.textContent();
+                    if (text) {
+                        result.exactIndustry = text.trim();
                     }
                 }
             } catch { }

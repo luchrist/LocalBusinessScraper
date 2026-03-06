@@ -40,6 +40,7 @@ export async function GET(
       return {
       Stadt: p.stadt,
       Branche: p.branche,
+      'Exakte Branche': p.exact_industry,
       Name: p.name,
       Adresse: p.address,
       Telefon: p.phone,

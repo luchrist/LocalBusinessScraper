@@ -591,6 +591,31 @@ export default function BusinessScraper() {
                 </div>
               </div>
 
+              {/* Worker Count – only relevant for high-volume (> 60) */}
+              {(maxBusinesses === 'max' || (typeof maxBusinesses === 'number' && maxBusinesses > 60)) && (
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-700">
+                    Maps Browser-Worker
+                    <span className="ml-1 text-xs text-gray-400">(RAM: &le;16 GB→1, &gt;16 GB→2)</span>
+                  </label>
+                  <div className="flex gap-1">
+                    {[0, 1, 2].map(n => (
+                      <button
+                        key={n}
+                        onClick={() => setWorkerCount(n)}
+                        className={`px-3 h-9 rounded-lg text-sm font-semibold transition-colors ${
+                          workerCount === n
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                        }`}
+                      >
+                        {n === 0 ? 'Auto' : n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Price Filter Collapsible */}
               <div className="border border-gray-200 rounded-lg overflow-hidden">
                 <button
@@ -637,31 +662,6 @@ export default function BusinessScraper() {
                   </div>
                 )}
               </div>
-
-              {/* Worker Count – only relevant for high-volume (> 60) */}
-              {(maxBusinesses === 'max' || (typeof maxBusinesses === 'number' && maxBusinesses > 60)) && (
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-gray-700">
-                    Maps Browser-Worker
-                    <span className="ml-1 text-xs text-gray-400">(RAM: &le;16 GB→1, &gt;16 GB→2)</span>
-                  </label>
-                  <div className="flex gap-1">
-                    {[0, 1, 2].map(n => (
-                      <button
-                        key={n}
-                        onClick={() => setWorkerCount(n)}
-                        className={`px-3 h-9 rounded-lg text-sm font-semibold transition-colors ${
-                          workerCount === n
-                            ? 'bg-indigo-600 text-white'
-                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                        }`}
-                      >
-                        {n === 0 ? 'Auto' : n}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           </div>
 

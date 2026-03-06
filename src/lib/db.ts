@@ -57,6 +57,7 @@ export interface PlaceRow {
   price: string | null;
   address: string | null;
   place_key: string | null;   // Google Maps internal ID / dedup key
+  exact_industry: string | null;
   email: string | null;
   owner: string | null;
   owner_salutations: string | null;
@@ -123,6 +124,7 @@ export function openDb(sessionId: string): Database.Database {
       price         TEXT,
       address       TEXT,
       place_key     TEXT,
+      exact_industry TEXT,
       email         TEXT,
       owner         TEXT,
       owner_salutations TEXT,
@@ -144,6 +146,7 @@ export function openDb(sessionId: string): Database.Database {
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_first_names TEXT`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_last_names TEXT`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_salutations TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE places ADD COLUMN exact_industry TEXT`); } catch {}
 
   dbCache.set(sessionId, db);
   return db;
@@ -273,19 +276,21 @@ export function insertPlace(
     price?: string;
     address?: string;
     placeKey?: string;
+    exactIndustry?: string;
   }
 ): string {
   const id = crypto.randomBytes(8).toString('hex');
   const enrichStatus: EnrichStatus = p.website ? 'pending' : 'no_website';
   db.prepare(`
     INSERT INTO places
-      (id, session_id, job_id, name, website, phone, rating, reviews, hours, price, address, place_key, enrich_status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, session_id, job_id, name, website, phone, rating, reviews, hours, price, address, place_key, exact_industry, enrich_status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, sessionId, jobId,
     p.name, p.website ?? null, p.phone ?? null,
     p.rating ?? null, p.reviews ?? null,
     p.hours ?? null, p.price ?? null, p.address ?? null, p.placeKey ?? null,
+    p.exactIndustry ?? null,
     enrichStatus, Date.now()
   );
   return id;

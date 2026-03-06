@@ -33,16 +33,6 @@ const STEALTH_SCRIPT = `
       : originalQuery(p);
 
   window.chrome = { runtime: {} };
-
-  // Hide map canvas / right-side map panel
-  const _style = document.createElement('style');
-  _style.textContent = [
-    'canvas { display: none !important; }',
-    '#scene { display: none !important; }',
-    'div[id="map"] { display: none !important; }',
-    '.section-layout-root > :last-child { display: none !important; }',
-  ].join('');
-  document.documentElement.appendChild(_style);
 `;
 
 // ─── ScraperWorker ────────────────────────────────────────────────────────────
@@ -128,29 +118,6 @@ export class ScraperWorker {
       deviceScaleFactor: 1,
       hasTouch: false,
       javaScriptEnabled: true,
-    });
-
-    // Block heavy / tracking resources + map tiles
-    await this.context.route('**/*', (route) => {
-      const type = route.request().resourceType();
-      const url  = route.request().url();
-
-      if (['image', 'media', 'font', 'stylesheet'].includes(type)) return route.abort();
-      if (
-        url.includes('google-analytics') || url.includes('googletagmanager') ||
-        url.includes('doubleclick')      || url.includes('analytics.')       ||
-        url.includes('/gtag/')           || url.includes('facebook.com')     ||
-        url.includes('twitter.com')
-      ) return route.abort();
-      // Block map tile / satellite tile requests (right-side map panel)
-      if (
-        url.includes('/maps/vt')          || // vector & raster map tiles
-        url.includes('khm.googleapis.com')|| // satellite tiles
-        url.includes('mts.google.com')    || // map tile server
-        url.includes('earthenterprise')      // earth tiles
-      ) return route.abort();
-
-      return route.continue();
     });
 
     this.page = await this.context.newPage();
