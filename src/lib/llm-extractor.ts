@@ -1,114 +1,140 @@
-let llama: any = null;
-let model: any = null;
+import { logger } from '@/lib/logger';
+import { Worker } from 'worker_threads';
+import path from 'path';
+
+let llmWorker: Worker | null = null;
 let isInitializing = false;
-let initPromise: Promise<void> | null = null;
 let llmAvailable = true;
+let initPromise: Promise<void> | null = null;
 
-// Pool configuration
-const MAX_SESSIONS = 2;
-const sessionPool: { session: any; context: any }[] = [];
-const waitingQueue: ((session: { session: any; context: any }) => void)[] = [];
+let jobId = 0;
+const pendingTasks = new Map<number, { resolve: (value: string) => void, reject: (reason?: unknown) => void }>();
 
-async function initializePool() {
-  if (sessionPool.length > 0 || !llmAvailable) return;
+let isWorkerBusy = false;
+const workerQueue: (() => void)[] = [];
+const activeSiteRequests = new Map<string, Promise<string | null>>();
+const resolvedOwnerBySite = new Map<string, string>();
 
-  // Use a promise to prevent race conditions during double-initialization
-  if (isInitializing) {
-     if (initPromise) await initPromise;
-     return;
-  }
-
-  isInitializing = true;
-  initPromise = (async () => {
-    try {
-      console.log("🚀 Initializing LLM Pool with " + MAX_SESSIONS + " workers...");
-      const { getLlama, LlamaChatSession } = await import("node-llama-cpp");
-      llama = await getLlama();
-      const modelPath = process.env.LLM_MODEL_PATH || "./models/llama-model.gguf";
-      
-      model = await llama.loadModel({
-        modelPath: modelPath,
-      });
-
-      // Create distinct contexts and sessions
-      for (let i = 0; i < MAX_SESSIONS; i++) {
-        console.log(`Creating Worker ${i + 1}...`);
-        const context = await model.createContext();
-        const session = new LlamaChatSession({
-          contextSequence: context.getSequence(),
-        });
-        sessionPool.push({ session, context });
-      }
-      console.log("✅ LLM Pool ready.");
-    } catch (error) {
-      console.error("Failed to initialize LLM Pool:", error);
-      llmAvailable = false;
-    } finally {
-      isInitializing = false;
-    }
-  })();
-
-  await initPromise;
+function normalizeSiteKey(siteKey?: string): string | null {
+  if (!siteKey) return null;
+  return siteKey.replace(/^https?:\/\//i, '').replace(/^www\./i, '').toLowerCase().trim() || null;
 }
 
-async function getSession() {
-  await initializePool();
-  if (!llmAvailable || (sessionPool.length === 0 && waitingQueue.length === 0 && !isInitializing)) {
-       // Emergency fallback if pool failed
-       if (sessionPool.length > 0) return sessionPool.pop();
-       return null;
+async function acquireWorkerLock(): Promise<void> {
+  if (!isWorkerBusy) {
+    isWorkerBusy = true;
+    return;
   }
-
-  if (sessionPool.length > 0) {
-    return sessionPool.pop();
-  }
-
-  // Wait for a free session
-  return new Promise<{ session: any; context: any }>((resolve) => {
-    waitingQueue.push(resolve);
+  return new Promise<void>((resolve) => {
+    workerQueue.push(resolve);
   });
 }
 
-function releaseSession(item: { session: any; context: any }) {
-  if (waitingQueue.length > 0) {
-    const next = waitingQueue.shift();
-    if (next) next(item);
+function releaseWorkerLock(): void {
+  if (workerQueue.length > 0) {
+    const next = workerQueue.shift();
+    if (next) next();
   } else {
-    sessionPool.push(item);
+    isWorkerBusy = false;
   }
 }
 
-export async function extractOwnerWithLLM(impressumText: string, businessInfo?: { name?: string, industry?: string }): Promise<string | null> {
-  const worker = await getSession();
+async function getWorker(): Promise<Worker | null> {
+  if (!llmAvailable) return null;
+  if (llmWorker) return llmWorker;
+
+  if (isInitializing && initPromise) {
+    await initPromise;
+    return llmWorker;
+  }
+
+  isInitializing = true;
+  initPromise = new Promise<void>((resolve) => {
+    logger.log("🚀 Spawning LLM Worker thread...");
+    const workerPath = path.resolve(process.cwd(), 'src/lib/llm-worker.mjs');
+    llmWorker = new Worker(workerPath);
+
+    llmWorker.on('message', (msg) => {
+      if (msg.type === 'READY') {
+        logger.log("✅ LLM Worker is ready.");
+        resolve();
+      } else if (msg.type === 'ERROR' && msg.id === null) {
+         logger.error("LLM Worker initialization failed:", msg.error);
+         llmAvailable = false;
+         llmWorker = null;
+         resolve();
+      } else if (msg.type === 'RESULT' || msg.type === 'ERROR') {
+        const task = pendingTasks.get(msg.id);
+        if (task) {
+          if (msg.type === 'RESULT') task.resolve(msg.data);
+          if (msg.type === 'ERROR') task.reject(new Error(msg.error));
+          pendingTasks.delete(msg.id);
+        }
+      }
+    });
+
+    llmWorker.on('error', (err) => {
+      logger.error("Worker error:", err);
+      llmAvailable = false;
+      llmWorker = null;
+      resolve();
+    });
+
+    llmWorker.on('exit', () => {
+      llmWorker = null;
+    });
+  });
+
+  await initPromise;
+  isInitializing = false;
+  return llmWorker;
+}
+
+export async function extractOwnerWithLLM(
+  impressumText: string,
+  businessInfo?: { name?: string, industry?: string },
+  queueOptions: { siteKey?: string } = {}
+): Promise<string | null> {
+  const siteKey = normalizeSiteKey(queueOptions.siteKey);
+  if (siteKey) {
+    const cachedOwner = resolvedOwnerBySite.get(siteKey);
+    if (cachedOwner) return cachedOwner;
+
+    const activeRequest = activeSiteRequests.get(siteKey);
+    if (activeRequest) {
+      logger.log(`   🧵 Reusing queued LLM task for site: ${siteKey}`);
+      return activeRequest;
+    }
+  }
+
+  const runTask = async (): Promise<string | null> => {
+  const worker = await getWorker();
   if (!worker) {
-    console.log("⚠️ LLM not available, skipping AI extraction");
+    logger.log("⚠️ LLM not available, skipping AI extraction");
     return null;
   }
 
-  console.log("impressum:", impressumText.substring(0, 1500));
-
+  await acquireWorkerLock();
   try {
-    const { session } = worker;
-    // console.log(`🤖 LLM Worker active (Queue: ${waitingQueue.length})`);
+    const prompt = `You are an intelligent German Impressum parser.
 
-    const prompt = `You are a strict German legal-notice (Impressum) extraction assistant.
-
-Business Name: ${businessInfo?.name || "Unknown"}
-Industry: ${businessInfo?.industry || "Unknown"}
-
-Task: Extract the NATURAL PERSON name(s) that represent the business from the text below.
-Accept these roles as valid indicators of the right person:
+Task: Extract the NATURAL PERSON name(s) that represent the business from the impressum text below.
+Look for names associated with these roles or contexts:
 - Inhaber/in, Geschäftsführer/in, Vertreten durch, Geschäftsleitung
-- Verantwortliche/r, Verantwortlich im Sinne der DSGVO, Verantwortlich für den Inhalt
+- Verantwortliche/r, Verantwortlich im Sinne der DSGVO, Verantwortlich für den Inhalt, Leitung, Manager
+- A natural person name appearing near the business name or "Impressum" heading.
+Note: Names can be of any origin (German, Greek, Turkish, etc.) and might not always have a clear title positioned directly next to them.
+
+Wir suchen einen Ansprechpartner von dem Unternehmen: "${businessInfo?.name || 'Unbekannt'}", das in der Branche "${businessInfo?.industry || 'Unbekannt'}" tätig ist.
 
 Rules:
-- Output ONLY natural person names (e.g., "Jasmin Schuster"). Never output addresses, streets, cities, phone numbers, emails, or company/shop names.
-- If no natural person is explicitly named in one of the roles above, return names: null.
-- If a person is found, set confidence >= 0.7 and include the matched role label.
+- Output ONLY natural person names (e.g., "Jasmin Schuster", "Panagiotis Panagiotopoulos"). 
+- Never output addresses, streets, cities, phone numbers, emails, company/shop names, organizations, venues, clubs, restaurants, associations, teams, locations, events, or anything containing digits.
+- If you genuinely cannot find any human name representing the business in the text, return names: "null".
 
 Return ONLY a JSON object with this format:
 {
-  "names": "Name 1, Name 2" (or null if none found),
+  "names": "Name 1, Name 2" (or "null" if none found),
   "confidence": 0.0 to 1.0 (float)
 }
 
@@ -117,13 +143,17 @@ ${impressumText.substring(0, 1500)}
 
 JSON Response:`;
 
-    // Note: Do not dispose session here, we reuse it!
-    const response = await session.prompt(prompt, {
-      maxTokens: 200,
-      temperature: 0.1,
+    const id = ++jobId;
+    
+    // Send task to worker
+    worker.postMessage({ type: 'PROMPT', id, prompt });
+
+    // Wait for response from worker
+    const response: string = await new Promise((resolve, reject) => {
+      pendingTasks.set(id, { resolve, reject });
     });
 
-    console.log("   🤖 LLM Response:", response);
+    logger.log("   🤖 LLM Response:", response);
 
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
@@ -133,7 +163,7 @@ JSON Response:`;
       const confidenceThreshold = 0.6;
 
       if (result.confidence < confidenceThreshold) {
-        console.log(`   📉 Low confidence (${result.confidence}) for: ${result.names}. Discarding.`);
+        logger.log(`   📉 Low confidence (${result.confidence}) for: ${result.names}. Discarding.`);
         return null;
       }
 
@@ -143,36 +173,116 @@ JSON Response:`;
       
       // Simple validation: check if returned name looks like a business name
       const forbiddenTerms = [
-        'gmbh', 'ug', 'ag', 'limited', 'ltd', 'inc', 'corp', 'co.', ' e.v.', 'restaurant', 'hotel', 'cafe', 'bar', 'bistro', 'praxis', 'kanzlei', 'shop', 'store', 'markt', 'service', 'team'
+        'gmbh', 'ug', 'ag', 'limited', 'ltd', 'inc', 'corp', 'co.', 'e.v.', 'ev', 'club', 'verein', 'vfr', 'sv', 'fc', 'fv', 'restaurant', 'hotel', 'cafe', 'bar', 'bistro', 'praxis', 'kanzlei', 'shop', 'store', 'markt', 'service', 'team'
       ];
       const lowerName = result.names.toLowerCase();
+
+      // Check for years (e.g. 2024, 2025)
+      if (/\b(19|20)\d{2}\b/.test(lowerName)) {
+         logger.log(`   🚫 LLM returned a name with a year: "${result.names}". Discarding.`);
+         return null;
+      }
+
+      // Use regex with lookarounds to ensure terms are matched only as whole words or separated by non-letters
+      // \p{L} matches any Unicode letter, effectively ignoring matches inside words (e.g. "Panagiotis" vs "AG")
+      const escapedTerms = forbiddenTerms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      const pattern = `(?<!\\p{L})(${escapedTerms.join('|')})(?!\\p{L})`;
       
-      if (forbiddenTerms.some(term => lowerName.includes(term))) {
-         console.log(`   🚫 LLM returned a business name/role instead of person: "${result.names}". Discarding.`);
+      if (new RegExp(pattern, 'iu').test(lowerName)) {
+         logger.log(`   🚫 LLM returned a business name/role instead of person: "${result.names}". Discarding.`);
          return null;
       }
 
       // Check against explicit business info if available
       if (businessInfo?.name && lowerName.includes(businessInfo.name.toLowerCase())) {
-          console.log(`   🚫 LLM returned the business name itself: "${result.names}". Discarding.`);
+          logger.log(`   🚫 LLM returned the business name itself: "${result.names}". Discarding.`);
           return null;
       }
       if (businessInfo?.industry && lowerName.includes(businessInfo.industry.toLowerCase())) {
-          console.log(`   🚫 LLM returned the industry name: "${result.names}". Discarding.`);
+          logger.log(`   🚫 LLM returned the industry name: "${result.names}". Discarding.`);
           return null;
       }
 
       return result.names;
     } catch (parseError) {
-      console.error("Failed to parse LLM JSON:", parseError);
+      logger.error("Failed to parse LLM JSON:", parseError);
       return null;
     }
 
   } catch (error) {
-    console.error("LLM extraction error:", error);
+    logger.error("LLM extraction error:", error);
     return null;
   } finally {
-    // Return worker to pool
-    releaseSession(worker);
+    releaseWorkerLock();
+  }
+  };
+
+  const taskPromise = runTask();
+  if (siteKey) {
+    activeSiteRequests.set(siteKey, taskPromise);
+  }
+
+  try {
+    const owner = await taskPromise;
+    if (siteKey && owner) {
+      resolvedOwnerBySite.set(siteKey, owner);
+      logger.log(`   ✅ LLM queue cleared for site after owner result: ${siteKey}`);
+    }
+    return owner;
+  } finally {
+    if (siteKey) {
+      activeSiteRequests.delete(siteKey);
+    }
+  }
+}
+
+export async function chooseNaturalPersonBetweenTwoLines(
+  line1: string,
+  line2: string,
+  context?: { cueLabel?: string; businessName?: string; industry?: string }
+): Promise<string | null> {
+  const worker = await getWorker();
+  if (!worker) {
+    logger.log('⚠️ LLM not available for two-line owner disambiguation');
+    return null;
+  }
+
+  await acquireWorkerLock();
+  try {
+    const prompt = `You are deciding between two candidate lines from a German Impressum.
+
+Task:
+- Choose exactly one candidate that sounds more like a natural person name.
+
+Context:
+- Cue label: ${context?.cueLabel || 'unknown'}
+- Business: ${context?.businessName || 'unknown'}
+- Industry: ${context?.industry || 'unknown'}
+
+Candidate line1: ${line1}
+Candidate line2: ${line2}
+
+Rules:
+- Prefer a natural person name.
+- Do not prefer addresses, legal entities, or company names.
+- Return only JSON with this exact shape:
+{"choice":"line1"} or {"choice":"line2"}`;
+
+    const id = ++jobId;
+    worker.postMessage({ type: 'BINARY_CHOICE', id, prompt });
+
+    const response: string = await new Promise((resolve, reject) => {
+      pendingTasks.set(id, { resolve, reject });
+    });
+
+    const parsed = JSON.parse(response.trim()) as { choice?: 'line1' | 'line2' };
+    if (parsed.choice === 'line1') return line1;
+    if (parsed.choice === 'line2') return line2;
+    return null;
+  } catch (error) {
+    logger.error('Two-line owner disambiguation failed:', error);
+    return null;
+  } finally {
+    releaseWorkerLock();
   }
 }

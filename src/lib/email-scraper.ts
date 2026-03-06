@@ -1,13 +1,37 @@
 import { Page, BrowserContext } from 'playwright';
-import { extractNames } from './extractNames';
+import { extractNamesDetailed } from './extractNames';
+import { scrapeImprintLightbox } from './lightBoxScrape';
+import { normalizeOwnerNameString, normalizeOwnerNamesFromCandidates } from './owner-name-normalizer';
 
 export const EMAIL_REGEX = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
 export const OBFUSCATED_EMAIL_REGEX = /([\w.+\-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|\<at\>|at|AT|ät))\s*([A-Za-z0-9.\-]+)\.([A-Za-z]{2,})/gi;
-export const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net', 'aol.com'];
+export const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net', 'aol.com', 'freenet.de', 'icloud.com', 't-online.de', 'live.com', 'protonmail.com', 'yandex.com'];
 
 export interface ScrapeResult {
   email: string | null;
   owner: string | null;
+  ownerFirstNames: string | null;
+  ownerLastNames: string | null;
+}
+
+const isResultComplete = (result: ScrapeResult, searchEmail: boolean, searchOwner: boolean): boolean => {
+  if (searchEmail && searchOwner) return Boolean(result.email && result.owner);
+  if (searchEmail) return Boolean(result.email);
+  if (searchOwner) return Boolean(result.owner);
+  return true;
+};
+
+const mergeScrapeResults = (base: ScrapeResult, next: ScrapeResult): ScrapeResult => ({
+  email: base.email || next.email,
+  owner: base.owner || next.owner,
+  ownerFirstNames: base.ownerFirstNames || next.ownerFirstNames,
+  ownerLastNames: base.ownerLastNames || next.ownerLastNames,
+});
+
+interface OwnerExtractionResult {
+  owner: string | null;
+  ownerFirstNames: string | null;
+  ownerLastNames: string | null;
 }
 
 // Helper for random delays (Jitter)
@@ -29,7 +53,7 @@ async function humanLikeInteraction(page: Page) {
      } catch {}
      
      await randomDelay(500, 1500);
-  } catch (e) {}
+  } catch {}
 }
 
 // Clean email by removing leading numbers, decoding, and trimming
@@ -83,6 +107,8 @@ const imprintPatterns: Record<string, RegExp> = {
 export function getImprintPattern(country: string = 'de'): RegExp {
   return imprintPatterns[country] || imprintPatterns.other;
 }
+
+const TEAM_REGEX = /team|about|ueber-uns|uber-uns|ueber uns|uber uns|who-we-are|our-story|company|unser-team|unser team/i;
 
 export function normalizeDomain(domain: string): string {
   return domain.toLowerCase()
@@ -157,27 +183,81 @@ export function extractEmailsFromText(text: string, domain: string, log: (msg: s
 
 // Extracted logic for finding owner in text (shared by HTTP and Playwright)
 export async function extractOwnerFromText(text: string, businessInfo: { name?: string, industry?: string }, log: (msg: string) => void): Promise<string | null> {
-    // Try regex extraction first
-    const names = extractNames(text, { takeFirst: false });
+    // Try regex extraction first, including optional two-line disambiguation metadata.
+    const extraction = extractNamesDetailed(text, { takeFirst: false });
+    let names = [...extraction.names];
+
+    if (extraction.pendingDisambiguations.length > 0) {
+      try {
+        const { chooseNaturalPersonBetweenTwoLines } = await import('./llm-extractor');
+
+        for (const pending of extraction.pendingDisambiguations) {
+          const lowerLine1 = pending.line1.toLowerCase();
+          const lowerLine2 = pending.line2.toLowerCase();
+          const hasLine1 = names.some(n => n.toLowerCase() === lowerLine1);
+          const hasLine2 = names.some(n => n.toLowerCase() === lowerLine2);
+
+          // Only disambiguate while both candidates are still present.
+          if (!hasLine1 || !hasLine2) continue;
+
+          log(`   🤖 Two-line owner disambiguation (${pending.cueLabel}): "${pending.line1}" vs "${pending.line2}"`);
+          const winner = await chooseNaturalPersonBetweenTwoLines(pending.line1, pending.line2, {
+            cueLabel: pending.cueLabel,
+            businessName: businessInfo.name,
+            industry: businessInfo.industry,
+          });
+
+          // Fallback requirement: keep both when LLM is unavailable or uncertain.
+          if (!winner) {
+            log('   ⚠️ Two-line disambiguation failed, keeping both candidates.');
+            continue;
+          }
+
+          const loser = winner.toLowerCase() === lowerLine1 ? pending.line2 : pending.line1;
+          const loserLower = loser.toLowerCase();
+          names = names.filter(name => name.toLowerCase() !== loserLower);
+          log(`   ✅ Two-line disambiguation picked: ${winner}`);
+        }
+      } catch (llmError) {
+        log(`   ⚠️ Two-line disambiguation unavailable: ${llmError instanceof Error ? llmError.message : String(llmError)}`);
+      }
+    }
+
     if (names.length > 0) {
-        const owner = names.join(', ');
-        log(`   👤 Owner found (regex): ${owner}`);
-        return owner;
+      const normalized = normalizeOwnerNamesFromCandidates(names);
+      log(`   👤 Owner found (regex): ${normalized.ownerDisplay}`);
+      return normalized.ownerDisplay;
     }
     
     // Fallback to LLM if regex found nothing
     log(`   🤖 No owner found with regex, trying LLM...`);
     try {
       const { extractOwnerWithLLM } = await import('./llm-extractor');
-      const llmOwner = await extractOwnerWithLLM(text, businessInfo);
-      if (llmOwner) {
-          log(`   👤 Owner found (LLM): ${llmOwner}`);
-          return llmOwner;
+        const llmOwner = await extractOwnerWithLLM(text, businessInfo);
+        if (llmOwner) {
+          const normalized = normalizeOwnerNameString(llmOwner);
+          log(`   👤 Owner found (LLM): ${normalized.ownerDisplay}`);
+          return normalized.ownerDisplay;
       }
     } catch (llmError) {
       log(`   ⚠️ LLM extraction unavailable: ${llmError instanceof Error ? llmError.message : String(llmError)}`);
     }
     return null;
+}
+
+export async function extractOwnerDetailsFromText(
+  text: string,
+  businessInfo: { name?: string, industry?: string },
+  log: (msg: string) => void
+): Promise<OwnerExtractionResult> {
+  const owner = await extractOwnerFromText(text, businessInfo, log);
+  const normalized = normalizeOwnerNameString(owner);
+
+  return {
+    owner: normalized.ownerDisplay,
+    ownerFirstNames: normalized.ownerFirstNames,
+    ownerLastNames: normalized.ownerLastNames,
+  };
 }
 
 async function extractEmailFromPage(page: Page, domain: string, isMainPage: boolean, log: (msg: string) => void): Promise<string | null> {
@@ -218,23 +298,25 @@ async function extractEmailFromPage(page: Page, domain: string, isMainPage: bool
   return extractEmailsFromText(text, domain, log);
 }
 
-async function searchPageForOwner(page: Page, businessInfo: { name?: string, industry?: string }, log: (msg: string) => void): Promise<string | null> {
+async function searchPageForOwner(page: Page, businessInfo: { name?: string, industry?: string }, log: (msg: string) => void): Promise<OwnerExtractionResult> {
   try {
     // Prefer innerText to preserve structure/newlines, fallback to textContent
     let text = await page.evaluate(() => document.body.innerText).catch(() => null);
     if (!text) text = await page.textContent('body');
     
-    if (!text) return null;
-    return extractOwnerFromText(text, businessInfo, log);
+    if (!text) {
+      return { owner: null, ownerFirstNames: null, ownerLastNames: null };
+    }
+    return extractOwnerDetailsFromText(text, businessInfo, log);
   } catch (e) {
       log(`   ⚠️ Failed to search for owner: ${e}`);
   }
-  return null;
+  return { owner: null, ownerFirstNames: null, ownerLastNames: null };
 }
 
 // HTTP Fallback function
 async function tryHttpScrape(url: string, domain: string, options: { searchEmail?: boolean; searchOwner?: boolean }, log: (msg: string) => void): Promise<ScrapeResult> {
-    const result: ScrapeResult = { email: null, owner: null };
+  const result: ScrapeResult = { email: null, owner: null, ownerFirstNames: null, ownerLastNames: null };
     try {
         log(`   ⚡ Trying HTTP GET first for ${url}...`);
         const controller = new AbortController();
@@ -267,22 +349,7 @@ async function tryHttpScrape(url: string, domain: string, options: { searchEmail
             }
         }
 
-        if (options.searchOwner) {
-             // For HTTP, we just use the raw HTML text (stripped of tags would be better but regex handles some noise)
-             // A simple tag stripper
-             const plainText = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gmi, "")
-                                   .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gmi, "")
-                                   .replace(/<[^>]+>/g, "\n")
-                                   .replace(/\s+/g, " ");
-             
-             // Only search owner if we are on a relevant page or if we found an Imprint link? 
-             // Owner search is expensive (LLM), so maybe only if we are sure it's an imprint page?
-             // But for main page, usually owner is not there.
-             // We can check if we are on an imprint page (url matches).
-             
-             // If this is HTTP, we can only check the current page. If we need to go to Imprint, we need another HTTP request.
-             // We can parse links here.
-        }
+           // Owner extraction intentionally happens in Playwright where subpage targeting is controlled.
         
         return result;
     } catch (e) {
@@ -293,42 +360,75 @@ async function tryHttpScrape(url: string, domain: string, options: { searchEmail
 
 
 // Playwright scraping with Jitter and Timeouts
-async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, domain: string, log: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string }, initialResult: ScrapeResult): Promise<ScrapeResult> {
+async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, domain: string, log: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string }, initialResult: ScrapeResult, deadlineTs?: number): Promise<ScrapeResult> {
     const { searchEmail = true, searchOwner = true, country = 'de', businessName, industry } = options;
     const result: ScrapeResult = { ...initialResult };
     const logger = log;
     const imprintPattern = getImprintPattern(country);
 
-    if ((searchEmail && result.email && !searchOwner) || (searchOwner && result.owner && !searchEmail) || (result.email && result.owner)) {
+    const assertNotTimedOut = () => {
+      if (deadlineTs && Date.now() > deadlineTs) {
+        throw new Error('Timeout');
+      }
+    };
+
+    if (isResultComplete(result, searchEmail, searchOwner)) {
         return result;
     }
 
     const page = await context.newPage();
     const visited = new Set<string>();
+
+    const canonicalizeForSubpageCheck = (value: string): string | null => {
+      try {
+        const url = new URL(value);
+        url.hash = '';
+
+        // Root query variants (e.g. ?lang=de) are treated as homepage.
+        if (url.pathname === '/') {
+          url.search = '';
+        }
+
+        if (url.pathname.length > 1) {
+          url.pathname = url.pathname.replace(/\/+$/, '');
+        }
+
+        return url.toString();
+      } catch {
+        return null;
+      }
+    };
     
     // Add jitter to page actions
-    const processPage = async (url: string, isMainPage: boolean = false, skipOwnerSearch: boolean = false) => {
-         if (visited.has(url)) return;
-         visited.add(url);
+        const processPage = async (url: string, isMainPage: boolean = false, skipOwnerSearch: boolean = false) => {
+          const canonicalUrl = canonicalizeForSubpageCheck(url);
+          if (!canonicalUrl || visited.has(canonicalUrl)) return;
+          visited.add(canonicalUrl);
+          assertNotTimedOut();
          
          try {
            logger(`   📲 Loading (Playwright): ${url}`);
            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+           assertNotTimedOut();
            
            // Human-like interaction
            await humanLikeInteraction(page);
+           assertNotTimedOut();
            
            if (searchEmail && !result.email) {
                 result.email = await extractEmailFromPage(page, domain, isMainPage, logger);
            }
            
-           const isImpressum = imprintPattern.test(url);
-           const shouldSearchOwner = searchOwner && !result.owner && isImpressum && !skipOwnerSearch;
+           const shouldSearchOwner = searchOwner && !result.owner && !skipOwnerSearch;
            
            if (shouldSearchOwner) {
                logger(`   🔍 Scanning for owner on impressum...`);
-               const owner = await searchPageForOwner(page, { name: businessName, industry }, logger);
-               if (owner) result.owner = owner;
+               const ownerResult = await searchPageForOwner(page, { name: businessName, industry }, logger);
+               if (ownerResult.owner) {
+                 result.owner = ownerResult.owner;
+                 result.ownerFirstNames = ownerResult.ownerFirstNames;
+                 result.ownerLastNames = ownerResult.ownerLastNames;
+               }
            }
     
          } catch (e) {
@@ -337,77 +437,99 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
     };
     
     try {
+      assertNotTimedOut();
         let baseUrl: URL;
         try { baseUrl = new URL(websiteUrl); } catch { return result; }
 
-        await processPage(websiteUrl, true);
+        // Homepage owner extraction is only allowed as a last fallback when no subpages exist.
+        await processPage(websiteUrl, true, true);
         
-        if ((searchEmail && result.email && !searchOwner) || (searchOwner && result.owner && !searchEmail) || (result.email && result.owner)) {
+        if (isResultComplete(result, searchEmail, searchOwner)) {
             await page.close();
             return result;
         }
 
+        assertNotTimedOut();
         const rawLinks = await page.$$eval('a[href]', (anchors: HTMLAnchorElement[]) => 
             anchors.map(a => a.getAttribute('href') || '').filter(h => h.trim().length > 0)
         ).catch(() => []);
         
-        const subpages = rawLinks.map(link => {
-            try { return new URL(link, baseUrl).href; } catch { return null; }
-        }).filter((link): link is string => {
+        const homepageCanonicalUrl = canonicalizeForSubpageCheck(baseUrl.href);
+
+        const subpages = rawLinks
+          .map((link) => {
+            try {
+              return canonicalizeForSubpageCheck(new URL(link, baseUrl).href);
+            } catch {
+              return null;
+            }
+          })
+          .filter((link): link is string => {
             if (!link) return false;
             try {
-               const u = new URL(link);
-               return u.hostname.replace(/^www\./, '') === domain && !visited.has(link);
-            } catch { return false; }
-        });
-        
-        const priorityPages = subpages.filter(url => imprintPattern.test(url));
-        
-        // Sort priority pages so Impressum is checked BEFORE Kontakt
-        priorityPages.sort((a, b) => {
-             const score = (url: string) => {
-                 const lower = url.toLowerCase();
-                 // Highest priority: Explicit imprint/impressum
-                 if (lower.includes('impressum') || lower.includes('imprint')) return 3;
-                 // Medium priority: Legal/Disclosure
-                 if (lower.includes('recht') || lower.includes('legal') || lower.includes('offenlegung')) return 2;
-                 // Lowest priority for "imprint pages": Contact
-                 if (lower.includes('kontakt') || lower.includes('contact')) return 1;
-                 return 0; 
-             };
-             return score(b) - score(a);
-        });
+              const u = new URL(link);
+              const sameDomain = u.hostname.replace(/^www\./, '') === domain;
+              const isHomepageVariant = homepageCanonicalUrl ? link === homepageCanonicalUrl : false;
+              const isBinaryFile = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|zip|rar|tar\.gz|gz|7z|png|jpe?g|gif|svg|webp|ico|mp4|mp3|avi|mov|wmv)$/i.test(u.pathname);
+              return sameDomain && !visited.has(link) && !isHomepageVariant && !isBinaryFile;
+            } catch {
+              return false;
+            }
+          });
 
-        const otherPages = subpages.filter(url => !imprintPattern.test(url));
-        
-        const orderedPages = [...priorityPages, ...otherPages];
+        const orderedPages = Array.from(new Set(subpages));
         logger(`📋 checking ${orderedPages.length} subpages`);
-  
-        let impressumChecked = false;
+
+        const scoreOwnerPrimary = (candidateUrl: string) => {
+          const lower = decodeURIComponent(candidateUrl).toLowerCase();
+          if (lower.includes('impressum') || lower.includes('imprint')) return 4;
+          if (lower.includes('recht') || lower.includes('legal') || lower.includes('offenlegung')) return 3;
+          if (lower.includes('kontakt') || lower.includes('contact')) return 2;
+          return 0;
+        };
+
+        const primaryOwnerCandidates = orderedPages
+          .filter((url) => scoreOwnerPrimary(url) > 0 || imprintPattern.test(url))
+          .sort((a, b) => scoreOwnerPrimary(b) - scoreOwnerPrimary(a));
+
+        const teamFallbackCandidates = orderedPages
+          .filter((url) => scoreOwnerPrimary(url) === 0 && TEAM_REGEX.test(decodeURIComponent(url)));
+
+        const primaryOwnerTargetUrl = primaryOwnerCandidates[0] || null;
+        const teamFallbackTargetUrl = teamFallbackCandidates[0] || null;
+
+        if (searchOwner && !result.owner && primaryOwnerTargetUrl) {
+          logger(`   🎯 Owner primary page: ${primaryOwnerTargetUrl}`);
+          await processPage(primaryOwnerTargetUrl, false, false);
+        }
+
+        if (
+          searchOwner &&
+          !result.owner &&
+          teamFallbackTargetUrl &&
+          teamFallbackTargetUrl !== primaryOwnerTargetUrl
+        ) {
+          logger(`   🎯 Owner team fallback page: ${teamFallbackTargetUrl}`);
+          await processPage(teamFallbackTargetUrl, false, false);
+        }
+
+        if (searchOwner && !result.owner && orderedPages.length === 0) {
+          logger('   🎯 No subpages found, checking homepage owner as final fallback.');
+          const ownerResult = await searchPageForOwner(page, { name: businessName, industry }, logger);
+          if (ownerResult.owner) {
+            result.owner = ownerResult.owner;
+            result.ownerFirstNames = ownerResult.ownerFirstNames;
+            result.ownerLastNames = ownerResult.ownerLastNames;
+          }
+        }
 
         for (const link of orderedPages) {
             // Stop conditions:
-            if ((searchEmail && result.email && !searchOwner) || (searchOwner && result.owner && !searchEmail) || (result.email && result.owner)) break;
-            
-            const isImpressum = imprintPattern.test(link);
-            const isExplicitImpressum = link.toLowerCase().includes('impressum') || link.toLowerCase().includes('imprint');
+          if (isResultComplete(result, searchEmail, searchOwner)) break;
+          assertNotTimedOut();
 
-            // If we found email but no owner: only check impressum pages
-            if (result.email && !isImpressum && !result.owner) {
-                continue;
-            }
-            
-            // Pass skipOwnerSearch=true if we already checked a "real" impressum
-            await processPage(link, false, impressumChecked);
-            
-            if (isExplicitImpressum) {
-                impressumChecked = true;
-                // If we checked an explicit impressum and found no owner, and we are not looking for email (or found it), we can stop.
-                if (searchOwner && !result.owner && (!searchEmail || result.email)) {
-                     logger('   🛑 Impressum checked, no owner. Stopping remaining owner text search.');
-                     break;
-                }
-            }
+            // Owner extraction is intentionally limited to one target page.
+            await processPage(link, false, true);
         }
         
     } catch (e) {
@@ -421,49 +543,85 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
 export async function findContactInfo(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string } = {}): Promise<ScrapeResult> {
   const { searchEmail = true, searchOwner = true, country = 'de' } = options;
   const logger = log || console.log;
-  let result: ScrapeResult = { email: null, owner: null };
+  const result: ScrapeResult = { email: null, owner: null, ownerFirstNames: null, ownerLastNames: null };
   const retryLimit = 1;
-  const totalTimeout = 30000; // 30s total budget (20s requested but buffer for retries)
+  const attemptTimeoutMs = 30000;
 
   logger(`🕷️  Starting scraping for: ${websiteUrl} (email: ${searchEmail}, owner: ${searchOwner}, country: ${country})`);
 
   let baseUrl: URL;
   try {
     baseUrl = new URL(websiteUrl);
-  } catch (e) {
+  } catch {
     logger(`❌ Invalid URL: ${websiteUrl}`);
     return result;
   }
   const domain = baseUrl.hostname.replace(/^www\./, '');
 
-  const doScrape = async (): Promise<ScrapeResult> => {
+    const doScrape = async (seed: ScrapeResult): Promise<ScrapeResult> => {
+     const deadlineTs = Date.now() + attemptTimeoutMs;
      // 1. Try HTTP (Fast)
-     let partialResult = await tryHttpScrape(websiteUrl, domain, options, logger);
-     if ((searchEmail && partialResult.email && !searchOwner) || (searchOwner && partialResult.owner && !searchEmail) || (partialResult.email && partialResult.owner)) {
-         return partialResult;
+    const httpResult = await tryHttpScrape(websiteUrl, domain, options, logger);
+    let partialResult = mergeScrapeResults(seed, httpResult);
+
+    // 1.5 Try homepage lightbox/impressum owner extraction before Playwright subpage scanning.
+    if (searchOwner && !partialResult.owner) {
+      logger('   🔦 Checking homepage lightbox impressum before subpage scan...');
+      try {
+        const lightboxResult = await scrapeImprintLightbox(websiteUrl, {
+          timeoutMs: 8000,
+          log: (msg: string) => logger(`   ${msg}`),
+        });
+
+        if (lightboxResult.owner || lightboxResult.email) {
+          if (lightboxResult.owner) logger(`   ✅ Owner found via lightbox impressum: ${lightboxResult.owner}`);
+          if (lightboxResult.email) logger(`   ✅ Email found via lightbox impressum: ${lightboxResult.email}`);
+          partialResult = mergeScrapeResults(partialResult, {
+            email: lightboxResult.email,
+            owner: lightboxResult.owner,
+            ownerFirstNames: lightboxResult.ownerFirstNames,
+            ownerLastNames: lightboxResult.ownerLastNames,
+          });
+        } else if (lightboxResult.lightboxFound) {
+          logger('   ℹ️ Impressum lightbox found but no owner extracted.');
+        } else {
+          logger('   ℹ️ No impressum lightbox detected on homepage.');
+        }
+      } catch (e) {
+        logger(`   ⚠️ Lightbox impressum check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+     if (isResultComplete(partialResult, searchEmail, searchOwner)) {
+       return partialResult;
      }
 
      // 2. Fallback to Playwright
-     return await tryPlaywrightScrape(context, websiteUrl, domain, logger, options, partialResult);
+     const playwrightResult = await tryPlaywrightScrape(context, websiteUrl, domain, logger, options, partialResult, deadlineTs);
+     return mergeScrapeResults(partialResult, playwrightResult);
   };
 
-  const attemptScrape = async (attemptsLeft: number): Promise<ScrapeResult> => {
+    const attemptScrape = async (attemptsLeft: number, currentResult: ScrapeResult): Promise<ScrapeResult> => {
       try {
-          // Promise.race for timeout
-          const scrapePromise = doScrape();
-          const timeoutPromise = new Promise<ScrapeResult>((_, reject) => setTimeout(() => reject(new Error("Timeout")), 20000));
-          return await Promise.race([scrapePromise, timeoutPromise]);
+        const attemptResult = await doScrape(currentResult);
+        const mergedResult = mergeScrapeResults(currentResult, attemptResult);
+        return mergedResult;
       } catch (e) {
+        const hasPartialResult = Boolean(currentResult.email || currentResult.owner);
+        if (hasPartialResult) {
+          logger(`   ⚠️ Returning partial result after error: ${e instanceof Error ? e.message : String(e)}`);
+          return currentResult;
+        }
           if (attemptsLeft > 0) {
               logger(`   🔄 Retry triggered (error: ${e instanceof Error ? e.message : String(e)})`);
-              return attemptScrape(attemptsLeft - 1);
+          return attemptScrape(attemptsLeft - 1, currentResult);
           }
           logger(`   ❌ Failed after retries: ${e instanceof Error ? e.message : String(e)}`);
-          return result;
+        return currentResult;
       }
   };
 
-  return attemptScrape(retryLimit);
+    return attemptScrape(retryLimit, result);
 }
 
 export async function findEmail(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void): Promise<string | null> {

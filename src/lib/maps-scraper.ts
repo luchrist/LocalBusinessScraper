@@ -1,4 +1,29 @@
-import { chromium, Browser, Page, BrowserContext } from 'playwright';
+import { logger } from '@/lib/logger';
+/**
+ * maps-scraper.ts – Stateless Google Maps scraper.
+ *
+ * Receives an already-open Playwright Page from ScraperPool / ScraperWorker.
+ * scrape() is an async generator so callers can break early.
+ */
+import { Page } from 'playwright';
+
+// ─── Block Detection ──────────────────────────────────────────────────────────
+
+/**
+ * Level 1 – Hard Block:   CAPTCHA / 403 redirect (URL or reCAPTCHA iframe)
+ * Level 2 – Soft Block:   Detail panel never opens after click (timeout ×2)
+ * Level 3 – Ghost Block:  Panel opens but API data missing for 3 rows in a row
+ */
+export type BlockLevel = 1 | 2 | 3;
+
+export class BlockDetectionError extends Error {
+    level: BlockLevel;
+    constructor(level: BlockLevel, message: string) {
+        super(message);
+        this.name = 'BlockDetectionError';
+        this.level = level;
+    }
+}
 
 export interface PlaceResult {
     name: string;
@@ -8,318 +33,401 @@ export interface PlaceResult {
     reviews?: number;
     hours?: string;
     address?: string;
+    placeKey?: string;   // dedup key extracted from Maps URL
 }
 
 export class GoogleMapsScraper {
-    private browser: Browser | null = null;
-    private context: BrowserContext | null = null;
-    private page: Page | null = null;
+    private page: Page;
 
-    async launch() {
-        this.browser = await chromium.launch({
-            headless: false, // Often needed for Google Maps to work properly/avoid immediate blocking, or debugging
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-infobars',
-                '--window-position=0,0',
-                '--ignore-certifcate-errors',
-                '--ignore-certifcate-errors-spki-list',
-                '--disable-blink-features=AutomationControlled', // Key for stealth
-            ],
-        });
-
-        this.context = await this.browser.newContext({
-            viewport: { width: 1366, height: 768 },
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        });
-
-        this.page = await this.context.newPage();
-
-        // Stealth scripts
-        await this.page.addInitScript(() => {
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
-        });
+    constructor(page: Page) {
+        this.page = page;
     }
 
-    private async randomDelay(min: number = 500, max: number = 2000) {
+    // ── Block detection helpers ────────────────────────────────────────────
+
+    /**
+     * Level 1 – Hard Block: checks current URL and DOM for CAPTCHA signals.
+     * Throws BlockDetectionError(1) if detected.
+     */
+    private async checkForHardBlock(): Promise<void> {
+        const url = this.page.url();
+        if (url.includes('/sorry/index') || url.includes('google.com/sorry')) {
+            throw new BlockDetectionError(1, `Hard block (CAPTCHA redirect): ${url}`);
+        }
+        const hasCaptcha = await this.page.$('iframe[src*="recaptcha"]')
+            .then(el => !!el)
+            .catch(() => false);
+        if (hasCaptcha) {
+            throw new BlockDetectionError(1, 'Hard block: reCAPTCHA iframe detected on page');
+        }
+    }
+
+    // Shorter, more realistic delays
+    private async randomDelay(min: number = 200, max: number = 600) {
         const delay = Math.floor(Math.random() * (max - min + 1) + min);
         await new Promise(resolve => setTimeout(resolve, delay));
     }
 
-    async search(city: string, industry: string) {
-        if (!this.page) throw new Error('Browser not initialized');
-
-        const query = `${industry} in ${city}`;
-
-        // Go to Google Maps
+    // Human-like mouse movement: curves toward element via a random intermediate point
+    private async humanMove(element: import('playwright').ElementHandle) {
         try {
-            await this.page.goto('https://www.google.com/maps', { waitUntil: 'domcontentloaded', timeout: 60000 });
-        } catch (e) {
-            console.log('Navigation timeout, checking if page loaded anyway...');
-        }
+            const box = await element.boundingBox();
+            if (!box) return;
 
-        // Robust Consent Handling
-        try {
-            const consentButton = await this.page.evaluateHandle(() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const target = buttons.find(b => {
-                    const label = (b.textContent || b.getAttribute('aria-label') || '').toLowerCase();
-                    return (
-                        label.includes('accept all') ||
-                        label.includes('agree') ||
-                        label === 'accept'
-                    );
-                });
-                return target;
-            });
+            // Randomised target within element bounds (avoid dead-center)
+            const targetX = box.x + box.width  * (0.25 + Math.random() * 0.5);
+            const targetY = box.y + box.height * (0.25 + Math.random() * 0.5);
 
-            if (await consentButton.asElement()) {
-                //@ts-expect-error
-                await consentButton.click();
-                await this.randomDelay(1000, 2000);
-            }
-        } catch (e) {
-            console.log('Error handling consent:', e);
-        }
+            // Intermediate point: slightly off-course, simulates natural cursor arc
+            const midX = targetX + (Math.random() - 0.5) * 100;
+            const midY = targetY + (Math.random() - 0.5) * 70;
 
-        // Try multiple strategies to find the search box
-        let searchBoxLocator = null;
-
-        // 1. Strict ID
-        try {
-            const locator = this.page.locator('#searchboxinput');
-            if (await locator.count() > 0 && await locator.isVisible()) searchBoxLocator = locator;
-        } catch { }
-
-        // 2. Input name="q"
-        if (!searchBoxLocator) {
-            try {
-                const locator = this.page.locator('input[name="q"]');
-                if (await locator.count() > 0 && await locator.isVisible()) searchBoxLocator = locator;
-            } catch { }
-        }
-
-        // 3. Fallback
-        if (!searchBoxLocator) {
-            try {
-                const locator = this.page.locator('input');
-                if (await locator.count() > 0) searchBoxLocator = locator.first();
-            } catch { }
-        }
-
-        if (!searchBoxLocator) {
-            await this.page.screenshot({ path: 'debug-error-searchbox.png' });
-            throw new Error('Could not find search box. See debug-error-searchbox.png');
-        }
-
-        await searchBoxLocator.first().fill(query);
-        await this.randomDelay(500, 1500);
-        await this.page.keyboard.press('Enter');
-
-        // Wait for feed (or single result)
-        try {
-            await Promise.any([
-                this.page.waitForSelector('div[role="feed"]', { timeout: 15000 }),
-                this.page.waitForSelector('h1', { timeout: 15000 })
-            ]);
-        } catch (e) {
-            console.log('Warning: initial result list potentially not found');
-        }
-        await this.randomDelay(2000, 4000);
+            await this.page.mouse.move(midX, midY, { steps: 8 });
+            await new Promise(r => setTimeout(r, 25 + Math.random() * 55));
+            await this.page.mouse.move(targetX, targetY, { steps: 5 });
+        } catch { /* element may have been detached */ }
     }
 
-    async scrape(onResult: (place: PlaceResult) => void) {
-        if (!this.page) throw new Error('Browser not initialized');
+    // Scroll feed in small irregular steps instead of jumping to the bottom at once
+    private async smoothScroll(feedSelector: string) {
+        const steps = 3 + Math.floor(Math.random() * 3); // 3–5 steps
+        for (let i = 0; i < steps; i++) {
+            await this.page.evaluate((sel) => {
+                const feed = document.querySelector(sel);
+                if (feed) {
+                    // Each step scrolls a random small amount
+                    feed.scrollTop += 180 + Math.random() * 220;
+                }
+            }, feedSelector);
+            await this.randomDelay(100, 300);
+        }
+    }
 
-        const feedSelector = 'div[role="feed"]';
-        let endOfList = false;
-        const scrapedNames = new Set<string>();
+    // Human-like typing with variable speed
+    private async humanType(text: string) {
+        for (const char of text) {
+            await this.page.keyboard.type(char);
+            // Variable typing speed: 30-120ms per character
+            await new Promise(resolve => setTimeout(resolve, 30 + Math.random() * 90));
+        }
+    }
 
-        while (!endOfList) {
-            // Re-query for items every time to avoid stale elements
-            const places = await this.page.$$('div[role="article"]');
-            let processedAnyInThisBatch = false;
+    async search(city: string, industry: string) {
+        const query = `${industry} in ${city}`;
 
-            for (const place of places) {
+        // Navigate with domcontentloaded (don't wait for images/fonts)
+        await this.page.goto('https://www.google.com/maps', {
+            waitUntil: 'domcontentloaded',
+            timeout: 20000
+        });
+
+        await this.randomDelay(400, 800);
+
+        // Handle consent dialog efficiently
+        try {
+            const consentHandled = await this.page.evaluate(() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const target = buttons.find(b => {
+                    const text = (b.textContent || '').toLowerCase();
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    return text.includes('accept') || text.includes('agree') || 
+                           aria.includes('accept') || aria.includes('agree') ||
+                           text.includes('reject all');
+                });
+
+                if (target) {
+                    (target as HTMLElement).click();
+                    return true;
+                }
+                return false;
+            });
+
+            if (consentHandled) {
+                await this.randomDelay(300, 600);
+            }
+        } catch (e) {
+            // Consent already handled or not present
+        }
+
+        // Find search box with multiple strategies
+        let searchFilled = false;
+
+        // Strategy 1: ID selector
+        try {
+            const box = await this.page.$('#searchboxinput');
+            if (box) {
+                await this.humanMove(box);
+                await box.click();
+                await this.randomDelay(100, 250);
+                await this.humanType(query);
+                searchFilled = true;
+            }
+        } catch { }
+
+        // Strategy 2: name attribute
+        if (!searchFilled) {
+            try {
+                const box = await this.page.$('input[name="q"]');
+                if (box) {
+                    await this.humanMove(box);
+                    await box.click();
+                    await this.randomDelay(100, 250);
+                    await this.humanType(query);
+                    searchFilled = true;
+                }
+            } catch { }
+        }
+
+        // Strategy 3: First input field
+        if (!searchFilled) {
+            try {
+                const box = await this.page.$('input[type="text"]');
+                if (box) {
+                    await this.humanMove(box);
+                    await box.click();
+                    await this.randomDelay(100, 250);
+                    await this.humanType(query);
+                    searchFilled = true;
+                }
+            } catch { }
+        }
+
+        if (!searchFilled) {
+            throw new Error('Could not locate search box');
+        }
+
+        await this.randomDelay(200, 500);
+        await this.page.keyboard.press('Enter');
+
+        // Wait for results - use networkidle for better timing
+        try {
+            await Promise.race([
+                this.page.waitForSelector('div[role="feed"]', { state: 'visible', timeout: 6000 }),
+                this.page.waitForLoadState('networkidle', { timeout: 6000 })
+            ]);
+        } catch (e) {
+            // Results may still be loading
+        }
+
+        await this.randomDelay(800, 1500);
+    }
+
+    /**
+     * Async generator – yields one PlaceResult per listing.
+     * Throws BlockDetectionError when a Google block signal is detected.
+     * Caller can break early (abort signal / max results).
+     */
+    async *scrape(signal?: AbortSignal): AsyncGenerator<PlaceResult> {
+        const feedSel = 'div[role="feed"]';
+        const seen    = new Set<string>();
+        let noNew = 0;
+
+        // Block detection counters
+        let consecutiveTimeouts = 0; // Level 2 – Soft block
+        let consecutiveEmpty    = 0; // Level 3 – Ghost block
+
+        while (true) {
+            if (signal?.aborted) break;
+
+            // ── Level 1: Hard block check at start of every scan loop ─────────
+            await this.checkForHardBlock();
+
+            const cards = await this.page.$$('div[role="article"]');
+            let processedOne = false;
+
+            for (const card of cards) {
+                if (signal?.aborted) return;
                 try {
-                    const ariaLabel = await place.getAttribute('aria-label');
-                    if (ariaLabel && !scrapedNames.has(ariaLabel)) {
+                    const label = await card.getAttribute('aria-label');
+                    if (!label || seen.has(label)) continue;
 
-                        // Click to open details
-                        await place.click();
-                        await this.randomDelay(800, 1500);
+                    await card.scrollIntoViewIfNeeded();
+                    await this.randomDelay(150, 400);
+                    await this.humanMove(card);
+                    await card.click();
+                    await this.randomDelay(400, 900);
 
-                        const details = await this.extractDetails(ariaLabel);
-
-                        if (details) {
-                            scrapedNames.add(ariaLabel);
-                            onResult(details);
+                    // ── Level 2: Soft block – detail panel must show <h1> within 5 s ──
+                    try {
+                        await this.page.waitForSelector('h1', { state: 'visible', timeout: 5000 });
+                        consecutiveTimeouts = 0; // panel loaded → reset counter
+                    } catch {
+                        consecutiveTimeouts++;
+                        logger.warn(`[Maps] Panel timeout #${consecutiveTimeouts} for "${label}"`);
+                        if (consecutiveTimeouts >= 2) {
+                            throw new BlockDetectionError(2,
+                                `Soft block: detail panel failed to load ${consecutiveTimeouts}× in a row`);
                         }
-
-                        // REMOVED: risky "Close" button click that was clearing the search.
-                        // On desktop (1366px), the list usually persists on the left.
-                        // If the list IS hidden (mobile/narrow), we should look for "Back to results".
-
-                        // Check if list is still visible/present, because details might cover it
-                        const listVisible = await this.page.isVisible(feedSelector);
-                        if (!listVisible) {
-                            // Try to click "Back" button if list is gone
-                            const backButton = await this.page.$('button[aria-label="Back"]');
-                            if (backButton) {
-                                await backButton.click();
-                                await this.randomDelay(500, 1000);
-                            }
-                        }
-
-                        processedAnyInThisBatch = true;
-                        // Break inner loop to re-scan DOM, as it might have shifted/updated
-                        break;
+                        continue; // skip this card, try next
                     }
+
+                    // ── Level 1: Re-check after click (URL may have changed) ──────────
+                    await this.checkForHardBlock();
+
+                    const details = await this.extractDetails(label);
+                    if (details) {
+                        // ── Level 3: Ghost block – count fully empty results ──────────
+                        const isEmpty = !details.phone && !details.website &&
+                                        !details.hours && !details.rating;
+                        if (isEmpty) {
+                            consecutiveEmpty++;
+                            logger.warn(`[Maps] Empty result #${consecutiveEmpty} for "${label}"`);
+                            if (consecutiveEmpty >= 3) {
+                                throw new BlockDetectionError(3,
+                                    `Ghost block: ${consecutiveEmpty} consecutive results with no data`);
+                            }
+                        } else {
+                            consecutiveEmpty = 0;
+                        }
+
+                        seen.add(label);
+                        noNew = 0;
+                        yield details;
+                    }
+
+                    // Ensure list panel is still visible
+                    const listVisible = await this.page.isVisible(feedSel).catch(() => false);
+                    if (!listVisible) {
+                        const back = await this.page.$('button[aria-label*="Back"]');
+                        if (back) { await back.click(); await this.randomDelay(300, 600); }
+                    }
+
+                    processedOne = true;
+                    break; // Re-scan DOM after each place
                 } catch (e) {
-                    console.error('Error processing place loop item:', e);
+                    if (e instanceof BlockDetectionError) throw e; // propagate immediately
+                    logger.error('[Maps] Error processing card:', e);
                 }
             }
 
-            // If we didn't process any new items in the current viewport/DOM state, we scroll
-            if (!processedAnyInThisBatch) {
-
-                // Check for specific "End of list" element
+            if (!processedOne) {
+                noNew++;
                 try {
-                    const endTextElement = await this.page.$('span.HlvSq');
-                    if (endTextElement) {
-                        const text = await endTextElement.innerText();
-                        if (text.includes("You've reached the end of the list")) {
-                            endOfList = true;
-                            console.log("Reached end of list marker.");
-                            break;
-                        }
+                    const end = await this.page.$('span.HlvSq');
+                    if (end && (await end.textContent())?.includes('end of the list')) {
+                        logger.log('[Maps] Reached end of list');
+                        break;
                     }
-                } catch (e) { }
+                } catch {}
 
-                // Ensure focus is on the feed before scrolling to prevent stuck scroll
-                try {
-                    // We don't click because it might open a result. Hover is safer.
-                    await this.page.hover(feedSelector);
-                } catch (e) { }
+                if (noNew > 4) { logger.log('[Maps] No new results, stopping'); break; }
 
-                // Scroll down
-                await this.page.evaluate((selector) => {
-                    const element = document.querySelector(selector);
-                    if (element) {
-                        element.scrollTop = element.scrollHeight;
-                    }
-                }, feedSelector);
-
-                await this.randomDelay(1500, 3000);
+                try { await this.page.hover(feedSel); } catch {}
+                await this.smoothScroll(feedSel);
+                await this.randomDelay(700, 1400);
             }
         }
+        logger.log(`[Maps] Done – ${seen.size} places found`);
     }
 
     private async extractDetails(name: string): Promise<PlaceResult | null> {
-        if (!this.page) return null;
-
         try {
+            const result: PlaceResult = { name };
+
+            // Extract a stable key from the page URL (contains CID / place ID)
+            try {
+                const url = this.page.url();
+                const m   = url.match(/place\/[^/]+\/([@\w!,+.-]+)/);
+                result.placeKey = m ? m[1] : undefined;
+            } catch {}
+
             // Website
-            const websiteBtn = await this.page.$('a[data-item-id="authority"]');
-            const website = websiteBtn ? await websiteBtn.getAttribute('href') || undefined : undefined;
+            try {
+                const link = await this.page.$('a[data-item-id="authority"]');
+                if (link) {
+                    result.website = await link.getAttribute('href') || undefined;
+                }
+            } catch { }
 
             // Phone
-            const phoneBtn = await this.page.$('button[data-item-id^="phone"]');
-            let phone = undefined;
-            if (phoneBtn) {
-                phone = (await phoneBtn.getAttribute('aria-label')) || undefined;
-                phone = phone?.replace('Phone: ', '').trim();
-            }
-
-            // Rating and Reviews
-            let rating = undefined;
-            let reviews = undefined;
-
             try {
-                const ratingEl = await this.page.$('.F7nice span[aria-hidden="true"]');
-                if (ratingEl) {
-                    const text = await ratingEl.textContent();
-                    if (text) rating = parseFloat(text);
-                }
-
-                const reviewsEl = await this.page.$('.F7nice span[aria-label*="reviews"]');
-                if (reviewsEl) {
-                    const label = await reviewsEl.getAttribute('aria-label');
+                const phoneBtn = await this.page.$('button[data-item-id^="phone"]');
+                if (phoneBtn) {
+                    const label = await phoneBtn.getAttribute('aria-label');
                     if (label) {
-                        const match = label.match(/(\d+)/);
-                        if (match) reviews = parseInt(match[0]);
+                        result.phone = label.replace(/^Phone:\s*/i, '').trim();
                     }
                 }
-            } catch (e) { }
+            } catch { }
 
-            // Opening hours
-            let hours = undefined;
+            // Rating & Reviews
             try {
-                const expandHoursBtn = await this.page.$('span[aria-label="Show open hours for the week"]');
-                if (expandHoursBtn) {
-                    await expandHoursBtn.click();
-                    await this.randomDelay(500, 1000);
+                const ratingText = await this.page.$eval(
+                    '.F7nice span[aria-hidden="true"]',
+                    el => el.textContent
+                ).catch(() => null);
 
-                    // Parse the specific table structure
+                if (ratingText) {
+                    result.rating = parseFloat(ratingText);
+                }
+
+                const reviewLabel = await this.page.$eval(
+                    '.F7nice span[aria-label*="reviews"]',
+                    el => el.getAttribute('aria-label')
+                ).catch(() => null);
+
+                if (reviewLabel) {
+                    const match = reviewLabel.match(/(\d[\d,]*)/);
+                    if (match) {
+                        result.reviews = parseInt(match[0].replace(/,/g, ''));
+                    }
+                }
+            } catch { }
+
+            // Hours
+            try {
+                // Try to expand hours first
+                const expandBtn = await this.page.$('button[aria-label*="open hours"], span[aria-label*="open hours"]');
+                if (expandBtn) {
+                    await expandBtn.click();
+                    await this.randomDelay(300, 600);
+
+                    // Parse hours table
                     const rows = await this.page.$$('table.eK4R0e tr.y0skZc');
                     if (rows.length > 0) {
-                        const hoursList = [];
+                        const hoursList: string[] = [];
                         for (const row of rows) {
                             try {
-                                const dayEl = await row.$('td.ylH6lf');
-                                const timeEl = await row.$('td.mxowUb');
-
-                                const day = dayEl ? await dayEl.innerText() : '';
-                                const time = timeEl ? await timeEl.getAttribute('aria-label') : '';
+                                const day = await row.$eval('td.ylH6lf', el => el.textContent?.trim()).catch(() => '');
+                                const time = await row.$eval('td.mxowUb', el => el.getAttribute('aria-label')).catch(() => '');
 
                                 if (day && time) {
                                     hoursList.push(`${day}: ${time}`);
                                 }
-                            } catch (e) { }
+                            } catch { }
                         }
                         if (hoursList.length > 0) {
-                            hours = hoursList.join(' | ');
-                        }
-                    }
-
-                    if (!hours) {
-                        const hoursTable = await this.page.$('table[role="presentation"]');
-                        if (hoursTable) {
-                            const hoursText = await hoursTable.innerText();
-                            hours = hoursText.replace(/\n/g, ', ');
+                            result.hours = hoursList.join(' | ');
                         }
                     }
                 }
 
-                // Final fallback to summary
-                if (!hours) {
-                    const hoursElement = await this.page.$('button[data-item-id="openhours"]');
-                    hours = hoursElement ? await hoursElement.getAttribute('aria-label') || undefined : undefined;
+                // Fallback to button label
+                if (!result.hours) {
+                    const hoursBtn = await this.page.$('button[data-item-id="openhours"]');
+                    if (hoursBtn) {
+                        result.hours = await hoursBtn.getAttribute('aria-label') || undefined;
+                    }
                 }
+            } catch { }
 
-            } catch (e) { }
+            // Address
+            try {
+                const addressBtn = await this.page.$('button[data-item-id="address"]');
+                if (addressBtn) {
+                    const label = await addressBtn.getAttribute('aria-label');
+                    if (label) {
+                        result.address = label.replace(/^Address:\s*/i, '').trim();
+                    }
+                }
+            } catch { }
 
-            return {
-                name,
-                website,
-                phone,
-                rating,
-                reviews,
-                hours
-            };
+            return result;
 
         } catch (e) {
-            console.error('Error extracting details', e);
+            logger.error('Error extracting details:', e);
             return null;
         }
     }
 
-    async close() {
-        if (this.browser) {
-            await this.browser.close();
-        }
-    }
 }

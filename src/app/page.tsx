@@ -1,7 +1,10 @@
+//page.tsx
 'use client';
 
 import React, { useState } from 'react';
 import { Upload, Download, Play, AlertCircle, CheckCircle, Loader } from 'lucide-react';
+import SettingsTab from '@/components/SettingsTab';
+import { normalizeOwnerNameString } from '@/lib/owner-name-normalizer';
 
 interface BusinessResult {
   stadt: string;
@@ -11,6 +14,8 @@ interface BusinessResult {
   website?: string;
   email?: string;
   owner?: string;
+  ownerFirstNames?: string;
+  ownerLastNames?: string;
   status?: string;
   rating?: number;
   reviews?: number;
@@ -23,7 +28,7 @@ const translations = {
   de: {
     title: 'Local Business Scraper',
     subtitle: 'Scrape Tausende lokale Unternehmen nach Stadt und Branche.',
-    uploadLabel: 'Excel- oder CSV-Datei hochladen mit den Spalten "Stadt" und "Branche":',
+    uploadLabel: 'Excel- oder CSV-Datei hochladen mit den Spalten "Stadt" und "Branche" (optionale Spalte "Max" überschreibt die maximale Anzahl pro Zeile):',
     uploadPlaceholder: 'Zum Hochladen klicken oder Datei hier ablegen',
     uploadError: 'Bitte nur Excel- oder CSV-Dateien hochladen',
     settings: 'Einstellungen',
@@ -32,6 +37,7 @@ const translations = {
     country: 'Land',
     maxBusinesses: 'Maximale Unternehmen pro Suche',
     startButton: 'Scraping starten',
+    cancelButton: 'Abbrechen',
     processing: 'Verarbeitung läuft...',
     leads: 'Leads',
     results: 'Ergebnisse',
@@ -48,7 +54,7 @@ const translations = {
     phone: 'Telefon',
     website: 'Website',
     howItWorks: 'So funktioniert es:',
-    step1: 'Excel- oder CSV-Datei mit den Spalten "Stadt" und "Branche" hochladen',
+    step1: 'Excel- oder CSV-Datei mit den Spalten "Stadt" und "Branche" hochladen (optionale Spalte "Max" pro Zeile möglich)',
     step2: 'Einen Kaffee holen',
     step3: 'Ergebnisse als CSV herunterladen',
     fileRequired: 'Bitte laden Sie zuerst eine Datei hoch',
@@ -56,12 +62,11 @@ const translations = {
     errorOccurred: 'Ein Fehler ist aufgetreten',
     run: 'Durchlauf',
     of: 'von',
-    singleWorker: 'Single Worker Mode (Debug)',
   },
   en: {
     title: 'Local Business Scraper',
     subtitle: 'Scrape thousands of local businesses by city and industry.',
-    uploadLabel: 'Upload Excel or CSV File with the columns "city" and "industry":',
+    uploadLabel: 'Upload Excel or CSV File with the columns "city" and "industry" (optional column "max" overrides the maximum per row):',
     uploadPlaceholder: 'Click to upload or drag file here',
     uploadError: 'Please upload only Excel or CSV files',
     settings: 'Settings',
@@ -70,6 +75,7 @@ const translations = {
     country: 'Country',
     maxBusinesses: 'Max businesses per search',
     startButton: 'Start Scraping',
+    cancelButton: 'Cancel',
     processing: 'Processing...',
     leads: 'Leads',
     results: 'Results',
@@ -86,15 +92,14 @@ const translations = {
     phone: 'Phone',
     website: 'Website',
     howItWorks: 'How it works:',
-    step1: 'Upload Excel or CSV file with columns "city" and "industry"',
+    step1: 'Upload Excel or CSV file with columns "city" and "industry" (optional "max" column per row supported)',
     step2: 'Get a coffee',
     step3: 'Download results as CSV',
     fileRequired: 'Please upload a file first',
     scrapingFailed: 'Scraping failed',
     errorOccurred: 'An error occurred',
     run: 'Run',
-    of: 'of',
-    singleWorker: 'Single Worker Mode (Debug)',
+    of: 'of'
   },
 };
 
@@ -116,6 +121,7 @@ const countries = [
 export default function BusinessScraper() {
   const [file, setFile] = useState<File | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [abortController, setAbortController] = useState<AbortController | null>(null);
   const [progress, setProgress] = useState({ 
     current: 0, 
     total: 0, 
@@ -132,6 +138,12 @@ export default function BusinessScraper() {
   const [searchOwner, setSearchOwner] = useState(true);
   const [country, setCountry] = useState('de');
   const [maxBusinesses, setMaxBusinesses] = useState<number | 'max' | ''>(60);
+  const [workerCount, setWorkerCount] = useState(2);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [resumeSessionId, setResumeSessionId] = useState('');
+  const [blockedInfo, setBlockedInfo] = useState<{ level: number; label: string; message: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<'scraper' | 'history' | 'settings'>('scraper');
+  const [history, setHistory] = useState<any[]>([]);
 
   const t = translations[language];
 
@@ -141,6 +153,17 @@ export default function BusinessScraper() {
     const detectedLang = browserLang.startsWith('de') ? 'de' : 'en';
     setLanguage(detectedLang);
   }, []);
+
+  React.useEffect(() => {
+    if (activeTab === 'history') {
+      fetch('/api/history')
+        .then(res => res.json())
+        .then(data => {
+            if (Array.isArray(data)) setHistory(data);
+        })
+        .catch(console.error);
+    }
+  }, [activeTab]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFile = e.target.files?.[0];
@@ -187,7 +210,12 @@ export default function BusinessScraper() {
     setProcessing(true);
     setError('');
     setResults(null);
+    setSessionId(null);
+    setBlockedInfo(null);
     setProgress({ current: 0, total: 0, status: 'Starte...', searchCount: 0, totalSearches: 0 });
+
+    const controller = new AbortController();
+    setAbortController(controller);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -196,11 +224,15 @@ export default function BusinessScraper() {
     formData.append('searchOwner', String(searchOwner));
     formData.append('country', country);
     formData.append('maxBusinesses', String(!maxBusinesses ? 20 : (maxBusinesses === 'max' ? 100000 : maxBusinesses)));
+    formData.append('workerCount', String(workerCount));
+
+    const tempResults: BusinessResult[] = [];
 
     try {
       const response = await fetch('/api/scrape', {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -209,8 +241,7 @@ export default function BusinessScraper() {
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
-      const tempResults: BusinessResult[] = [];
-
+      
       if (!reader) {
         throw new Error('Stream nicht verfügbar');
       }
@@ -227,7 +258,9 @@ export default function BusinessScraper() {
             try {
               const data = JSON.parse(line.slice(6));
               
-              if (data.type === 'progress') {
+              if (data.type === 'session') {
+                setSessionId(data.sessionId);
+              } else if (data.type === 'progress') {
                 setProgress({
                   current: data.current,
                   total: data.total,
@@ -239,16 +272,23 @@ export default function BusinessScraper() {
                 tempResults.push(data.result);
                 setResults([...tempResults]);
               } else if (data.type === 'complete') {
-                setResults(data.results);
+                // Results already accumulated via individual 'result' events – no need to re-send the full array
+                setResults([...tempResults]);
                 setProgress({
-                  current: data.results.length,
-                  total: data.results.length,
+                  current: tempResults.length,
+                  total: tempResults.length,
                   status: data.message,
                   searchCount: 0,
                   totalSearches: 0,
                 });
               } else if (data.type === 'error') {
                 setError(data.message);
+              } else if (data.type === 'blocked') {
+                setBlockedInfo({
+                  level: data.level,
+                  label: data.label ?? `Level ${data.level}`,
+                  message: data.message,
+                });
               }
             } catch (e) {
               // Skip invalid JSON
@@ -257,9 +297,23 @@ export default function BusinessScraper() {
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t.errorOccurred);
+      if ((err as Error).name === 'AbortError') {
+        console.log('Scraping aborted by user');
+         // Keep results as they are and ensure they are set in state
+         setResults([...tempResults]);
+      } else {
+        setError(err instanceof Error ? err.message : t.errorOccurred);
+      }
     } finally {
       setProcessing(false);
+      setAbortController(null);
+    }
+  };
+
+  const cancelScraping = () => {
+    if (abortController) {
+      abortController.abort();
+      // Results already in state, final update in catch block
     }
   };
 
@@ -267,20 +321,42 @@ export default function BusinessScraper() {
     if (!results) return;
 
     const csv = [
-      [t.city, t.industry, t.name, t.phone, t.website, t.email, t.owner, t.rating, t.reviews, t.hours, t.status].join(','),
-      ...results.map((r: BusinessResult) => [
-        r.stadt,
-        r.branche,
-        r.name || '',
-        r.telefon || '',
-        r.website || '',
-        r.email || '',
-        r.owner || '',
-        r.rating?.toString() || '',
-        r.reviews?.toString() || '',
-        r.hours || '',
-        r.status || ''
-      ].map(field => `"${String(field).replace(/"/g, '""')}"`).join(','))
+      [
+        t.city,
+        t.industry,
+        t.name,
+        t.phone,
+        t.website,
+        t.email,
+        `${t.owner} Vorname`,
+        `${t.owner} Nachname`,
+        t.owner,
+        t.rating,
+        t.reviews,
+        t.hours,
+        t.status,
+      ].join(','),
+      ...results.map((r: BusinessResult) => {
+        const fallback = normalizeOwnerNameString(r.owner);
+        const ownerFirstNames = r.ownerFirstNames ?? fallback.ownerFirstNames ?? '';
+        const ownerLastNames = r.ownerLastNames ?? fallback.ownerLastNames ?? '';
+
+        return [
+          r.stadt,
+          r.branche,
+          r.name || '',
+          r.telefon || '',
+          r.website || '',
+          r.email || '',
+          ownerFirstNames,
+          ownerLastNames,
+          r.owner || '',
+          r.rating?.toString() || '',
+          r.reviews?.toString() || '',
+          r.hours || '',
+          r.status || ''
+        ].map(field => `"${String(field).replace(/"/g, '""')}"`).join(',');
+      })
     ].join('\n');
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -319,6 +395,41 @@ export default function BusinessScraper() {
             {t.subtitle}
           </p>
 
+          <div className="flex border-b border-gray-200 mb-8">
+            <button
+              onClick={() => setActiveTab('scraper')}
+              className={`py-2 px-4 font-medium text-sm transition-colors relative ${
+                activeTab === 'scraper' 
+                  ? 'text-indigo-600 border-b-2 border-indigo-600' 
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Scraper
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`py-2 px-4 font-medium text-sm transition-colors relative ${
+                activeTab === 'history' 
+                  ? 'text-indigo-600 border-b-2 border-indigo-600' 
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              History
+            </button>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`py-2 px-4 font-medium text-sm transition-colors relative ${
+                activeTab === 'settings' 
+                  ? 'text-indigo-600 border-b-2 border-indigo-600' 
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {t.settings}
+            </button>
+          </div>
+
+          {activeTab === 'scraper' && (
+            <>
           {/* Upload Section */}
           <div className="mb-8">
             <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -443,46 +554,129 @@ export default function BusinessScraper() {
                   >
                     Max
                   </button>
-
-              {/* Single Worker Mode Toggle */}
-              <div className="flex items-center justify-between pt-2 border-t border-gray-200 mt-2">
-                <label className="text-sm font-medium text-gray-700">{t.singleWorker}</label>
-                <button
-                  onClick={() => setSingleWorker(!singleWorker)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    singleWorker ? 'bg-indigo-600' : 'bg-gray-300'
-                  }`}
-                >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      singleWorker ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
                 </div>
               </div>
+
+              {/* Worker Count – only relevant for high-volume (> 60) */}
+              {(maxBusinesses === 'max' || (typeof maxBusinesses === 'number' && maxBusinesses > 60)) && (
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-700">
+                    Maps Browser-Worker
+                    <span className="ml-1 text-xs text-gray-400">(RAM: &lt;8 GB→1, 8-16 GB→2, &gt;16 GB→3)</span>
+                  </label>
+                  <div className="flex gap-1">
+                    {[1, 2, 3].map(n => (
+                      <button
+                        key={n}
+                        onClick={() => setWorkerCount(n)}
+                        className={`w-10 h-9 rounded-lg text-sm font-semibold transition-colors ${
+                          workerCount === n
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                        }`}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
           {/* Start Button */}
-          <button
-            onClick={startScraping}
-            disabled={!file || processing}
-            className="w-full bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
-          >
-            {processing ? (
-              <>
-                <Loader className="animate-spin mr-2" />
-                {t.processing}
-              </>
-            ) : (
-              <>
-                <Play className="mr-2" />
-                {t.startButton}
-              </>
+          <div className="flex gap-4">
+            <button
+              onClick={startScraping}
+              disabled={!file || processing}
+              className="flex-1 bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+            >
+             {processing ? (
+                <>
+                  <Loader className="animate-spin mr-2" />
+                  {t.processing}
+                </>
+              ) : (
+                <>
+                  <Play className="mr-2" />
+                  {t.startButton}
+                </>
+              )}
+            </button>
+            
+            {processing && (
+              <button
+                onClick={cancelScraping}
+                className="bg-red-500 text-white py-3 px-6 rounded-lg font-semibold hover:bg-red-600 transition-colors flex items-center justify-center"
+              >
+                  <AlertCircle className="mr-2" />
+                  {t.cancelButton}
+              </button>
             )}
-          </button>
+          </div>
+
+          {/* Resume Section */}
+          {!processing && (
+            <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+              <h4 className="text-sm font-semibold text-gray-700 mb-2">Session fortsetzen</h4>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={resumeSessionId}
+                  onChange={e => setResumeSessionId(e.target.value)}
+                  placeholder="Session-ID eingeben..."
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={async () => {
+                    if (!resumeSessionId.trim()) return;
+                    setProcessing(true);
+                    setError('');
+                    setSessionId(resumeSessionId.trim());
+                    setProgress({ current: 0, total: 0, status: 'Resuming...', searchCount: 0, totalSearches: 0 });
+                    const controller = new AbortController();
+                    setAbortController(controller);
+                    const tempResults: BusinessResult[] = [];
+                    setResults([]);
+
+                    try {
+                      const response = await fetch(`/api/resume?session=${resumeSessionId.trim()}`, {
+                        signal: controller.signal,
+                      });
+                      const reader = response.body?.getReader();
+                      const decoder = new TextDecoder();
+                      if (!reader) return;
+                      while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        const lines = decoder.decode(value).split('\n');
+                        for (const line of lines) {
+                          if (!line.startsWith('data: ')) continue;
+                          try {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.type === 'progress') setProgress({ current: data.current, total: data.total, status: data.message, searchCount: data.searchCount ?? 0, totalSearches: data.totalSearches ?? 0 });
+                            else if (data.type === 'result') { tempResults.push(data.result); setResults([...tempResults]); }
+                            else if (data.type === 'complete') setResults([...tempResults]);
+                            else if (data.type === 'error') setError(data.message);
+                          } catch {}
+                        }
+                      }
+                    } catch (err) {
+                      if ((err as Error).name === 'AbortError') { setResults([...tempResults]); }
+                      else { setError(err instanceof Error ? err.message : 'Error'); }
+                    } finally {
+                      setProcessing(false);
+                      setAbortController(null);
+                    }
+                  }}
+                  disabled={!resumeSessionId.trim() || processing}
+                  className="px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold hover:bg-amber-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                >
+                  Resume
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Progress */}
           {processing && (
@@ -505,6 +699,54 @@ export default function BusinessScraper() {
                   className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
                   style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }}
                 />
+              </div>
+              {sessionId && (
+                <div className="mt-3 flex items-center gap-2 text-xs text-indigo-700">
+                  <span className="font-medium">Session-ID:</span>
+                  <code className="bg-indigo-100 px-2 py-0.5 rounded font-mono">{sessionId}</code>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(sessionId)}
+                    className="text-indigo-500 hover:text-indigo-700 underline"
+                  >
+                    Kopieren
+                  </button>
+                  <span className="text-indigo-400">(bei Abbruch damit fortsetzen)</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Blocked Banner */}
+          {blockedInfo && (
+            <div className={`mt-6 p-4 rounded-lg border flex items-start gap-3 ${
+              processing
+                ? 'bg-orange-50 border-orange-300'
+                : 'bg-yellow-50 border-yellow-300'
+            }`}>
+              <AlertCircle className="h-5 w-5 text-orange-500 mt-0.5 flex-shrink-0" />
+              <div className="flex-1">
+                <p className="font-semibold text-orange-900">
+                  {language === 'de'
+                    ? `⚠️ Temporär von Google gesperrt`
+                    : `⚠️ Temporarily blocked by Google`}
+                  {' '}
+                  <span className="text-orange-600 font-normal text-sm">
+                    ({blockedInfo.label})
+                  </span>
+                </p>
+                <p className="text-sm text-orange-800 mt-1">
+                  {language === 'de'
+                    ? 'Google Maps Scraping wurde pausiert. Bereits gefundene Ergebnisse bleiben erhalten.'
+                    : 'Google Maps scraping has been paused. Results collected so far are preserved.'}
+                </p>
+                {processing && (
+                  <p className="text-xs text-orange-600 mt-1 italic">
+                    {language === 'de'
+                      ? '⏳ Email-Enrichment läuft noch für bereits gescrapte Einträge...'
+                      : '⏳ Email enrichment is still running for already-scraped entries...'}
+                  </p>
+                )}
+                <p className="text-xs text-orange-500 mt-2 font-mono break-all">{blockedInfo.message}</p>
               </div>
             </div>
           )}
@@ -624,6 +866,71 @@ export default function BusinessScraper() {
               <li>{t.step3}</li>
             </ol>
           </div>
+          </>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="space-y-4">
+               {history.length === 0 ? (
+                 <p className="text-gray-500 text-center py-8">Keine Scrape-Historie gefunden.</p>
+               ) : (
+                 <div className="overflow-x-auto">
+                   <table className="w-full text-sm text-left border rounded-lg">
+                     <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b">
+                       <tr>
+                         <th className="px-6 py-3">Datum</th>
+                         <th className="px-6 py-3">Session ID</th>
+                         <th className="px-6 py-3">Status</th>
+                         <th className="px-6 py-3">Jobs</th>
+                         <th className="px-6 py-3">Aktion</th>
+                       </tr>
+                     </thead>
+                     <tbody>
+                       {history.map((session) => (
+                         <tr key={session.id} className="bg-white border-b hover:bg-gray-50 last:border-b-0">
+                           <td className="px-6 py-4">
+                             {new Date(session.created_at).toLocaleString()}
+                           </td>
+                            <td className="px-6 py-4 font-mono text-xs text-gray-500">
+                             {session.id}
+                           </td>
+                           <td className="px-6 py-4">
+                             <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                               session.status === 'active' ? 'bg-blue-100 text-blue-800' :
+                               session.status === 'done' ? 'bg-green-100 text-green-800' :
+                               'bg-gray-100 text-gray-800'
+                             }`}>
+                               {session.status}
+                             </span>
+                           </td>
+                           <td className="px-6 py-4 text-gray-600">
+                             {session.total_jobs}
+                           </td>
+                           <td className="px-6 py-4">
+                             <a
+                               href={`/api/history/${session.id}/download`}
+                               className="font-medium text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                               target="_blank"
+                               rel="noopener noreferrer"
+                             >
+                               <Download className="w-4 h-4" /> Download
+                             </a>
+                           </td>
+                         </tr>
+                       ))}
+                     </tbody>
+                   </table>
+                 </div>
+               )}
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <SettingsTab
+              singleWorker={singleWorker}
+              setSingleWorker={setSingleWorker}
+            />
+          )}
         </div>
       </div>
     </div>

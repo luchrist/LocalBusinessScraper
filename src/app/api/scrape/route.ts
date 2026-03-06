@@ -1,8 +1,17 @@
+//api/scrape
+import { logger } from '@/lib/logger';
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { chromium, BrowserContext } from 'playwright';
 import { findContactInfo } from '@/lib/email-scraper';
-import { GoogleMapsScraper } from '@/lib/maps-scraper';
+import { GoogleMapsScraper, BlockDetectionError } from '@/lib/maps-scraper';
+import { ScraperPool } from '@/lib/scraper-pool';
+import { getNextAvailableKey, incrementApiKeyUsage, initSettingsDb } from '@/lib/settings-db';
+import {
+  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs,
+  type EnrichStatus,
+} from '@/lib/db';
+
 
 interface BusinessData {
   Stadt?: string;
@@ -20,6 +29,8 @@ interface BusinessResult {
   website?: string;
   email?: string;
   owner?: string;
+  ownerFirstNames?: string;
+  ownerLastNames?: string;
   status: string;
   hours?: string;
   rating?: number;
@@ -39,23 +50,53 @@ interface Place {
 
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
+// Initialize settings DB
+try {
+  initSettingsDb();
+} catch (e) {
+  logger.error('Failed to initialize settings DB:', e);
+}
+
+// Helper to flexibly get column values
+function getColumnValue(row: any, keys: string[]): string | undefined {
+  const rowKeys = Object.keys(row);
+  for (const key of keys) {
+    // Exact match
+    if (row[key]) return row[key];
+    
+    // Case-insensitive match from row keys
+    const foundKey = rowKeys.find(k => k.toLowerCase() === key.toLowerCase());
+    if (foundKey && row[foundKey]) return row[foundKey];
+  }
+  return undefined;
+}
+
 export async function POST(request: NextRequest) {
-  console.log('🚀 Scraping request started');
+  logger.log('🚀 Scraping request started');
   
   if (!GOOGLE_PLACES_API_KEY) {
-    console.error('❌ Google Places API Key missing');
-    return NextResponse.json(
-      { error: 'Google Places API Key missing in .env.local' },
-      { status: 500 }
-    );
+    // Legacy check removed, using DB keys now.
+    // logger.error('❌ Google Places API Key missing');
   }
 
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
+  
+  // Abort check
+  let isAborted = false;
+  request.signal.addEventListener('abort', () => {
+      logger.log('⚠️ Client aborted request');
+      isAborted = true;
+  });
 
   const sendProgress = async (data: any) => {
-    await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+    if (isAborted) return;
+    try {
+        await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+    } catch {
+        isAborted = true;
+    }
   };
 
   // Start processing in background
@@ -67,27 +108,53 @@ export async function POST(request: NextRequest) {
       const searchOwner = formData.get('searchOwner') === 'true';
       const country = (formData.get('country') as string) || 'de';
       const singleWorker = formData.get('singleWorker') === 'true';
+      const workerCountRaw = parseInt(formData.get('workerCount') as string) || 0;
       const maxBusinessesStr = formData.get('maxBusinesses') as string;
       const maxBusinesses = maxBusinessesStr === 'max' ? Infinity : parseInt(maxBusinessesStr) || Infinity;
+      
+      // Clear logs at the start of a new scrape
+      logger.clear();
 
       if (!file) {
-        console.error('❌ No file uploaded');
+        logger.error('❌ No file uploaded');
         await sendProgress({ type: 'error', message: 'No file uploaded' });
         await writer.close();
         return;
       }
 
-      console.log(`📁 File received: ${file.name} (${file.size} bytes)`);
-      console.log(`⚙️  Options: searchEmail=${searchEmail}, searchOwner=${searchOwner}, country=${country}, maxBusinesses=${maxBusinesses}, singleWorker=${singleWorker}`);
+      logger.log(`📁 File received: ${file.name} (${file.size} bytes)`);
+      logger.log(`⚙️  Options: searchEmail=${searchEmail}, searchOwner=${searchOwner}, country=${country}, maxBusinesses=${maxBusinesses}, singleWorker=${singleWorker}`);
 
       // Parse Excel file
       const buffer = await file.arrayBuffer();
       const workbook = XLSX.read(buffer);
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const data: BusinessData[] = XLSX.utils.sheet_to_json(sheet);
-      console.log(`📊 Excel file parsed: ${data.length} rows found`);
+      const rawData = XLSX.utils.sheet_to_json(sheet);
+      logger.log(`📊 Excel file parsed: ${rawData.length} rows found`);
 
-      const results: BusinessResult[] = [];
+      // Normalize data structure
+      const data = rawData.map((row: any) => {
+        const maxRaw = getColumnValue(row, ['max', 'maximum', 'max_results', 'maxresults']);
+        const rowMax = maxRaw ? parseInt(maxRaw) : undefined;
+        return {
+          stadt: getColumnValue(row, ['stadt', 'city', 'ort', 'location', 'town']),
+          branche: getColumnValue(row, ['branche', 'industry', 'category', 'keyword', 'niche', 'business']),
+          max_results: rowMax && !isNaN(rowMax) && rowMax > 0 ? rowMax : null,
+        };
+      }).filter(row => row.stadt && row.branche); // Filter out empty or invalid rows
+
+      logger.log(`✅ Normalized data: ${data.length} valid search rows ready`);
+
+      if (data.length === 0) {
+        throw new Error('No valid rows found. Please ensure columns are named "Stadt"/"City" and "Branche"/"Industry".');
+      }
+
+      // SQLite session – scraping results written to disk immediately, never piling up in RAM
+      const sessionId = newSessionId();
+      const db = openDb(sessionId);
+      createSession(db, { sessionId, workerCount: workerCountRaw || 2, searchEmail, searchOwner, country });
+      await sendProgress({ type: 'session', sessionId });
+
       const seenPlaceIds = new Set<string>();
       const seenDomains = new Set<string>();
       
@@ -105,361 +172,361 @@ export async function POST(request: NextRequest) {
         locale: 'de-DE',
         timezoneId: 'Europe/Berlin',
       });
-      console.log('🌐 Browser launched');
+
+      // OPTIMIZATION: Block images, fonts, css and analytics to save resources
+      await context.route('**/*', (route) => {
+        const type = route.request().resourceType();
+        const url = route.request().url();
+        
+        // Block heavy resources
+        if (['image', 'font', 'stylesheet', 'media'].includes(type)) {
+          return route.abort();
+        }
+        
+        // Block common trackers
+        if (
+          url.includes('google-analytics') || 
+          url.includes('googletagmanager') || 
+          url.includes('facebook.com') || 
+          url.includes('doubleclick')
+        ) {
+          return route.abort();
+        }
+
+        return route.continue();
+      });
+
+      logger.log('🌐 Browser launched');
 
       let processedBusinesses = 0;
       let totalBusinessesFound = 0; // Total businesses found so far
       let searchCount = 0;
-      const totalSearches = data.filter(row => (row.Stadt || row.stadt) && (row.Branche || row.branche)).length;
+      const totalSearches = data.length;
 
-      if (maxBusinesses > 60) {
-        // High-volume scraper logic (Parallel Plan)
-        console.log('🚀 Using High-Volume Scraper (GoogleMapsScraper)');
-        
-        // Helper for email queue
-        const emailConcurrencyLimit = singleWorker ? 1 : 5;
-        let activeEmailScrapes = 0;
-        const emailQueue: (() => Promise<void>)[] = [];
-        
-        const processEmailQueue = () => {
-            while (activeEmailScrapes < emailConcurrencyLimit && emailQueue.length > 0) {
-                const task = emailQueue.shift();
-                if (task) {
-                    activeEmailScrapes++;
-                    task().finally(() => {
-                        activeEmailScrapes--;
-                        processEmailQueue();
-                    });
-                }
+      // ── Block detection state ─────────────────────────────────────────
+      let mapsPaused = false; // set to true when a block is detected
+
+      // ── Unified pipeline: per-row decision API (effectiveMax ≤ 60) vs Scraping (> 60) ──
+      const hasScrapingRows = data.some(row => (row.max_results ?? maxBusinesses) > 60);
+      const workerCount = singleWorker ? 1 : ScraperPool.recommendedWorkerCount(workerCountRaw || undefined);
+      const pool = new ScraperPool();
+      if (hasScrapingRows) {
+        logger.log(`[Pool] ${workerCount} Maps worker(s) initialised – some rows will use scraping`);
+        await pool.initialize(workerCount);
+        request.signal.addEventListener('abort', async () => {
+          await pool.close().catch(() => {});
+        });
+      }
+
+      for (const row of data) {
+        if (isAborted) break;
+        const stadt = row.stadt!;
+        const branche = row.branche!;
+        const effectiveMax = (row.max_results != null && row.max_results > 0)
+          ? row.max_results
+          : maxBusinesses;
+
+        searchCount++;
+        const mode = effectiveMax <= 60 ? 'API' : 'Scraping';
+        logger.log(`🔍 [${mode}] "${branche}" in "${stadt}" (max: ${effectiveMax === Infinity ? '∞' : effectiveMax})`);
+
+        await sendProgress({
+          type: 'progress',
+          message: `[${mode}] "${branche}" in "${stadt}"`,
+          current: processedBusinesses,
+          total: totalBusinessesFound,
+          searchCount,
+          totalSearches,
+        });
+
+        if (effectiveMax <= 60) {
+          // ── API PATH ────────────────────────────────────────────────────────
+          const places = await searchPlaces(stadt, branche, effectiveMax, sendProgress);
+          logger.log(`✅ Found ${places.length} places for "${branche}" in "${stadt}"`);
+
+          const jobMax = effectiveMax === Infinity ? null : effectiveMax;
+          const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: jobMax });
+
+          const uniquePlaces: Place[] = [];
+          for (const place of places) {
+            if (seenPlaceIds.has(place.id)) {
+              logger.log(`♻️ Skipping duplicate place ID: ${place.name}`);
+              continue;
             }
-        };
+            let domain: string | null = null;
+            if (place.website) {
+              try { domain = new URL(place.website).hostname.replace(/^www\./, ''); } catch {}
+            }
+            if (domain && seenDomains.has(domain)) {
+              logger.log(`♻️ Skipping duplicate domain: ${domain} (${place.name})`);
+              continue;
+            }
+            seenPlaceIds.add(place.id);
+            if (domain) seenDomains.add(domain);
+            uniquePlaces.push(place);
+          }
 
-        const enqueueEmailTask = (task: () => Promise<void>) => {
-            emailQueue.push(task);
-            processEmailQueue();
-        };
+          logger.log(`✅ Deduplicated: ${places.length} -> ${uniquePlaces.length} unique new places`);
+          totalBusinessesFound += uniquePlaces.length;
 
-        const rowTasks = data.map(row => async () => {
-          const stadt = row.Stadt || row.stadt;
-          const branche = row.Branche || row.branche;
-
-          if (!stadt || !branche) return;
-
-          searchCount++; // Approximate
           await sendProgress({
             type: 'progress',
-            message: `Scraping "${branche}" in "${stadt}"`,
+            message: `[API] "${branche}" in "${stadt}" – ${uniquePlaces.length} unique places found`,
             current: processedBusinesses,
             total: totalBusinessesFound,
             searchCount,
-            totalSearches: totalSearches,
+            totalSearches,
           });
 
-          const scraper = new GoogleMapsScraper();
-          try {
-            await scraper.launch();
-            await scraper.search(stadt, branche);
-            
-            await scraper.scrape(async (placeResult) => {
-               // Limit check
-               // Note: This global check is approximate in parallel execution
-               if (totalBusinessesFound >= maxBusinesses && maxBusinesses !== Infinity) return;
+          let rowProcessedCount = 0;
+          const processPlace = async (place: Place) => {
+            if (isAborted) return;
+            if (rowProcessedCount >= effectiveMax) return;
+            rowProcessedCount++;
 
-               const placeId = `${placeResult.name}|${placeResult.address}`;
-               if (seenPlaceIds.has(placeId)) return;
-               
-               let domain: string | null = null;
-               if (placeResult.website) {
-                 try {
-                   domain = new URL(placeResult.website).hostname.replace(/^www\./, '');
-                   if (domain && seenDomains.has(domain)) return;
-                 } catch {}
-               }
-
-               seenPlaceIds.add(placeId);
-               if (domain) seenDomains.add(domain);
-               
-               totalBusinessesFound++;
-
-               const processDetails = async () => {
-                  let email: string | null = null;
-                  let owner: string | null = null;
-                  let status = 'no_website';
-
-                  if (placeResult.website && (searchEmail || searchOwner)) {
-                      status = 'searching';
-                      try {
-                        const contactInfo = await findContactInfo(context, placeResult.website, undefined, { 
-                            searchEmail, 
-                            searchOwner,
-                            country,
-                            businessName: placeResult.name,
-                            industry: branche
-                        });
-                        email = contactInfo.email;
-                        owner = contactInfo.owner;
-                        status = (email || owner) ? 'success' : 'no_match';
-                      } catch (err) {
-                        console.error(`Error searching email for ${placeResult.website}:`, err);
-                        status = 'error';
-                      }
-                  } else if (!placeResult.website) {
-                      status = 'no_website';
-                  } else {
-                      status = 'skipped';
-                  }
-
-                  const finalResult: BusinessResult = {
-                    stadt,
-                    branche,
-                    name: placeResult.name,
-                    adresse: placeResult.address,
-                    telefon: placeResult.phone,
-                    website: placeResult.website,
-                    email: email || undefined,
-                    owner: owner || undefined,
-                    hours: placeResult.hours,
-                    rating: placeResult.rating,
-                    reviews: placeResult.reviews,
-                    status
-                  };
-
-                  results.push(finalResult);
-                  processedBusinesses++;
-
-                  await sendProgress({
-                    type: 'result',
-                    result: finalResult,
-                    current: processedBusinesses,
-                    total: totalBusinessesFound,
-                  });
-               };
-
-               enqueueEmailTask(processDetails);
+            // Insert placeholder into DB immediately
+            const placeKey = place.id || `${place.name}|${place.address}`;
+            const dbId = insertPlace(db, sessionId, jobId, {
+              name: place.name,
+              website: place.website,
+              phone: place.phone,
+              rating: place.rating,
+              reviews: place.reviews,
+              hours: place.hours,
+              address: place.address,
+              placeKey: placeKey,
             });
 
-          } catch (e) {
-            console.error(`Error scraping ${branche} in ${stadt}:`, e);
-          } finally {
-            try { await scraper.close(); } catch {}
-          }
-        });
+            let email: string | null = null;
+            let owner: string | null = null;
+            let ownerFirstNames: string | null = null;
+            let ownerLastNames: string | null = null;
+            let status = 'no_website';
 
-        // Run scraper rows with 3 parallel workers (or 1 if debug)
-        await runWithLimit(rowTasks, singleWorker ? 1 : 3);
-        
-        // Wait for remaining email tasks
-        while(activeEmailScrapes > 0 || emailQueue.length > 0) {
-            await new Promise(r => setTimeout(r, 1000));
-        }
-
-      } else {
-        // Standard Logic (<= 60 results)
-        for (const row of data) {
-            const stadt = row.Stadt || row.stadt;
-            const branche = row.Branche || row.branche;
-    
-            if (!stadt || !branche) {
-              console.log('⏭️ Skipping row: missing Stadt or Branche');
-              continue;
-            }
-    
-            searchCount++;
-            console.log(`🔍 Searching for "${branche}" in "${stadt}"`);
-            
-            // Suche mit Google Places API (Updated helper returns new fields)
-            const places = await searchPlaces(stadt, branche, maxBusinesses);
-            console.log(`✅ Found ${places.length} places for "${branche}" in "${stadt}"`);
-            
-            // Deduplicate places
-            const uniquePlaces: Place[] = [];
-            for (const place of places) {
-                // Check ID
-                if (seenPlaceIds.has(place.id)) {
-                  console.log(`♻️ Skipping duplicate place ID: ${place.name}`);
-                  continue;
-                }
-                
-                // Check Domain
-                let domain: string | null = null;
-                if (place.website) {
-                    try {
-                        domain = new URL(place.website).hostname.replace(/^www\./, '');
-                    } catch {}
-                }
-                
-                if (domain && seenDomains.has(domain)) {
-                  console.log(`♻️ Skipping duplicate domain: ${domain} (${place.name})`);
-                  continue;
-                }
-                
-                // Add to new sets
-                seenPlaceIds.add(place.id);
-                if (domain) seenDomains.add(domain);
-                uniquePlaces.push(place);
-            }
-    
-            console.log(`✅ Deduplicated: ${places.length} -> ${uniquePlaces.length} unique new places to process`);
-            
-            totalBusinessesFound += uniquePlaces.length;
-            
-            await sendProgress({
-              type: 'progress',
-              message: `Searching for "${branche}" in "${stadt}" - ${uniquePlaces.length} new unique places found`,
-              current: processedBusinesses,
-              total: totalBusinessesFound,
-              searchCount,
-              totalSearches: totalSearches,
-            });
-
-            let rowProcessedCount = 0;
-    
-            // Define processing logic for a single place
-            const processPlace = async (place: Place) => {
-              if (rowProcessedCount >= maxBusinesses) return;
-              rowProcessedCount++; // Reserve slot synchronously to prevent race conditions
-    
+            if (place.website && (searchEmail || searchOwner)) {
+              logger.log(`🔗 Checking website for "${place.name}": ${place.website}`);
               await sendProgress({
                 type: 'progress',
-                message: `Checking ${place.name}`,
+                message: `Searching for ${searchEmail && searchOwner ? 'email & owner' : searchEmail ? 'email' : 'owner'} on ${place.website}`,
+                current: processedBusinesses, total: totalBusinessesFound, searchCount, totalSearches,
+              });
+              status = 'searching';
+              const contactInfo = await findContactInfo(context, place.website, (msg) => logger.log(msg), {
+                searchEmail, searchOwner, country, businessName: place.name, industry: branche,
+              });
+              if (searchEmail) email = contactInfo.email;
+              if (searchOwner) {
+                owner = contactInfo.owner;
+                ownerFirstNames = contactInfo.ownerFirstNames;
+                ownerLastNames = contactInfo.ownerLastNames;
+              }
+              status = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
+              if (email)  logger.log(`✉️  Email found: ${email}`);
+              if (owner)  logger.log(`👤 Owner found: ${owner}`);
+              if (!email && !owner && (searchEmail || searchOwner)) {
+                logger.log(`❌ No ${searchEmail && searchOwner ? 'email or owner' : searchEmail ? 'email' : 'owner'} found on ${place.website}`);
+              }
+            } else if (!place.website) {
+              logger.log(`⚠️  No website for "${place.name}"`);
+            } else {
+              logger.log(`⏭️  Skipping contact info search for "${place.name}" (disabled)`);
+              status = 'skipped';
+            }
+
+            // Update DB with enrichment result
+            updatePlaceEnriched(db, dbId, {
+              email: email || null,
+              owner: owner || null,
+              ownerFirstNames: ownerFirstNames || null,
+              ownerLastNames: ownerLastNames || null,
+              status: status as EnrichStatus,
+            });
+
+            const apiResult: BusinessResult = {
+              stadt, branche, name: place.name, adresse: place.address,
+              telefon: place.phone, website: place.website,
+              email: email || undefined,
+              owner: owner || undefined,
+              ownerFirstNames: ownerFirstNames || undefined,
+              ownerLastNames: ownerLastNames || undefined,
+              status, hours: place.hours, rating: place.rating, reviews: place.reviews,
+            };
+            processedBusinesses++;
+            await sendProgress({
+              type: 'result',
+              result: apiResult,
+              current: processedBusinesses,
+              total: totalBusinessesFound,
+            });
+          };
+
+          const domainGroups = new Map<string, Place[]>();
+          const noWebsitePlaces: Place[] = [];
+          for (const place of uniquePlaces) {
+            if (place.website) {
+              try {
+                const domain = new URL(place.website).hostname;
+                if (!domainGroups.has(domain)) domainGroups.set(domain, []);
+                domainGroups.get(domain)!.push(place);
+              } catch { noWebsitePlaces.push(place); }
+            } else {
+              noWebsitePlaces.push(place);
+            }
+          }
+          const tasks: (() => Promise<void>)[] = [
+            ...[...domainGroups.values()].map(group => async () => { 
+              for (const p of group) {
+                if (isAborted) break;
+                await processPlace(p); 
+              }
+            }),
+            ...noWebsitePlaces.map(p => async () => {
+              if (isAborted) return;
+              await processPlace(p);
+            }),
+          ];
+          // Limit concurrency to avoid overloading system resources (especially when running local LLM)
+          // Default reduced from 10 to 3 for stability
+          await runWithLimit(tasks, singleWorker ? 1 : 3);
+        } else if (mapsPaused) {
+          // Maps is blocked – skip scraping rows, enrichment for prior results is already done
+          logger.log(`[Scraping] Skipping "${branche}" in "${stadt}" – Maps is paused (block detected)`);
+          continue;        } else {
+          // ── SCRAPING PATH ──────────────────────────────────────────────────
+          // Create a job row in SQLite so place FK is satisfied
+          const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results });
+          const worker = await pool.acquire();
+          try {
+            const scraper = new GoogleMapsScraper(worker.page!);
+            await scraper.search(stadt, branche);
+
+            let scraped = 0;
+            for await (const place of scraper.scrape(request.signal)) {
+              if (isAborted) break;
+              if (effectiveMax !== Infinity && scraped >= effectiveMax) break;
+
+              const placeKey = place.placeKey || `${place.name}|${place.address ?? ''}`;
+              if (seenPlaceIds.has(placeKey)) continue;
+              let domain: string | null = null;
+              if (place.website) {
+                try { domain = new URL(place.website).hostname.replace(/^www\./, ''); } catch {}
+              }
+              if (domain && seenDomains.has(domain)) continue;
+              seenPlaceIds.add(placeKey);
+              if (domain) seenDomains.add(domain);
+
+              totalBusinessesFound++;
+              await sendProgress({
+                type: 'progress',
+                message: `[Scraping] Checking ${place.name}`,
                 current: processedBusinesses,
                 total: totalBusinessesFound,
                 searchCount,
-                totalSearches: totalSearches,
+                totalSearches,
               });
-    
+
               let email: string | null = null;
               let owner: string | null = null;
-              let status = 'no_website';
-    
+              let ownerFirstNames: string | null = null;
+              let ownerLastNames: string | null = null;
+              let enrichStatus = 'no_website';
               if (place.website && (searchEmail || searchOwner)) {
-                console.log(`🔗 Checking website for "${place.name}": ${place.website}`);
-                await sendProgress({
-                  type: 'progress',
-                  message: `Searching for ${searchEmail && searchOwner ? 'email & owner' : searchEmail ? 'email' : 'owner'} on ${place.website}`,
-                  current: processedBusinesses,
-                  total: totalBusinessesFound,
-                  searchCount,
-                  totalSearches: totalSearches,
-                });
-                
-                status = 'searching';
-                const contactInfo = await findContactInfo(context, place.website, undefined, { 
-                  searchEmail, 
-                  searchOwner,
-                  country,
-                  businessName: place.name,
-                  industry: branche
-                });
-                
-                if (searchEmail) {
-                  email = contactInfo.email;
-                }
-                if (searchOwner) {
-                  owner = contactInfo.owner;
-                }
-    
-                status = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
-                if (email) {
-                  console.log(`✉️  Email found: ${email}`);
-                }
-                if (owner) {
-                  console.log(`👤 Owner found: ${owner}`);
-                }
-                if (!email && !owner && (searchEmail || searchOwner)) {
-                  console.log(`❌ No ${searchEmail && searchOwner ? 'email or owner' : searchEmail ? 'email' : 'owner'} found on ${place.website}`);
+                try {
+                  const info = await findContactInfo(context, place.website, (msg) => logger.log(msg), {
+                    searchEmail, searchOwner, country, businessName: place.name, industry: branche,
+                  });
+                  email = info.email;
+                  owner = info.owner;
+                  ownerFirstNames = info.ownerFirstNames;
+                  ownerLastNames = info.ownerLastNames;
+                  enrichStatus = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
+                } catch (err) {
+                  logger.error(`[Enrich] Error ${place.website}:`, err);
+                  enrichStatus = 'error';
                 }
               } else if (!place.website) {
-                console.log(`⚠️  No website for "${place.name}"`);
+                enrichStatus = 'no_website';
               } else {
-                console.log(`⏭️  Skipping contact info search for "${place.name}" (disabled)`);
-                status = 'skipped';
+                enrichStatus = 'skipped';
               }
-    
-              results.push({
-                stadt,
-                branche,
-                name: place.name,
-                adresse: place.address,
-                telefon: place.phone,
-                website: place.website,
+
+              // Write to SQLite (disk) – not to a RAM array
+              const placeKey2 = place.placeKey || `${place.name}|${place.address ?? ''}`;
+              const dbId = insertPlace(db, sessionId, jobId, {
+                name: place.name, website: place.website ?? undefined,
+                phone: place.phone ?? undefined, rating: place.rating ?? undefined,
+                reviews: place.reviews ?? undefined, hours: place.hours ?? undefined,
+                address: place.address ?? undefined, placeKey: placeKey2,
+              });
+              updatePlaceEnriched(db, dbId, {
+                email: email || null,
+                owner: owner || null,
+                ownerFirstNames: ownerFirstNames || null,
+                ownerLastNames: ownerLastNames || null,
+                status: enrichStatus as EnrichStatus,
+              });
+
+              const scrapingResult: BusinessResult = {
+                stadt, branche, name: place.name, adresse: place.address ?? undefined,
+                telefon: place.phone ?? undefined, website: place.website ?? undefined,
                 email: email || undefined,
                 owner: owner || undefined,
-                status,
-                hours: place.hours,    // New field
-                rating: place.rating,  // New field
-                reviews: place.reviews // New field
-              });
-              
+                ownerFirstNames: ownerFirstNames || undefined,
+                ownerLastNames: ownerLastNames || undefined,
+                status: enrichStatus, hours: place.hours ?? undefined,
+                rating: place.rating ?? undefined, reviews: place.reviews ?? undefined,
+              };
               processedBusinesses++;
-              
               await sendProgress({
-                type: 'result',
-                result: results[results.length - 1],
-                current: processedBusinesses,
-                total: totalBusinessesFound,
+                type: 'result', result: scrapingResult,
+                current: processedBusinesses, total: totalBusinessesFound,
               });
-            };
-    
-            // Group places by domain to respect "max 1 per domain" constraint
-            const domainGroups = new Map<string, Place[]>();
-            const noWebsitePlaces: Place[] = [];
-    
-            for (const place of uniquePlaces) {
-                if (place.website) {
-                   try {
-                       const domain = new URL(place.website).hostname;
-                       if (!domainGroups.has(domain)) domainGroups.set(domain, []);
-                       domainGroups.get(domain)!.push(place);
-                   } catch {
-                       noWebsitePlaces.push(place);
-                   }
-                } else {
-                    noWebsitePlaces.push(place);
-                }
+              scraped++;
             }
-    
-            // Create tasks
-            const tasks: (() => Promise<void>)[] = [];
-    
-            // 1. Domain tasks (Sequential processing of places for that domain)
-            for (const [_, groupPlaces] of domainGroups) {
-                tasks.push(async () => {
-                    for (const place of groupPlaces) {
-                       await processPlace(place);
-                    }
-                });
+          } catch (e) {
+            if (e instanceof BlockDetectionError) {
+              mapsPaused = true;
+              const levelLabels: Record<number, string> = {
+                1: 'Hard Block (CAPTCHA / 403)',
+                2: 'Soft Block (Detail-Panel lädt nicht)',
+                3: 'Ghost Block (Keine API-Daten)',
+              };
+              const label = levelLabels[e.level] ?? `Level ${e.level}`;
+              logger.warn(`[BlockDetection] Level ${e.level} – ${label}: ${e.message}`);
+              await sendProgress({
+                type: 'blocked',
+                level: e.level,
+                label,
+                message: e.message,
+              });
+              // Results collected so far are kept; do not mark as fatal error
+            } else {
+              logger.error(`[Scraping] Error for "${branche}" in "${stadt}":`, e);
             }
-    
-            // 2. No website tasks (can be parallelized individually)
-            for (const place of noWebsitePlaces) {
-                tasks.push(async () => {
-                    await processPlace(place);
-                });
-            }
-    
-            // Execute with concurrency limit of 10 (or 1 if debug)
-            await runWithLimit(tasks, singleWorker ? 1 : 10);
-            
-            // Adjust totalBusinessesFound to reflect that we skipped some due to limit
-            // This ensures the progress bar makes sense (e.g., if we found 20 but limit is 5, we shouldn't show 5/20 forever)
-            // But doing this accurately is tricky since "processedBusinesses" is global.
-            // For now, let's just keep the progress accurate to WHAT WAS PROCESSED vs WHAT WAS FOUND.
+          } finally {
+            try { await worker.resetContext(); } catch {}
+            pool.release(worker);
+          }
+        }
       }
-    }
 
+      if (hasScrapingRows) await pool.close();
+      
+      updateSessionTotalJobs(db, sessionId, processedBusinesses);
+      closeDb(sessionId);
 
       await context.close();
       await browser.close();
-      console.log(`🎉 Scraping completed successfully. Total results: ${results.length}`);
+      logger.log(`🎉 Scraping completed successfully. Total results: ${processedBusinesses}`);
 
+      // No full results array sent – client has accumulated them via individual 'result' events
       await sendProgress({
         type: 'complete',
-        results,
+        total: processedBusinesses,
         message: 'Scraping completed!',
       });
     } catch (error) {
-      console.error('❌ Scraping error:', error);
+      logger.error('❌ Scraping error:', error);
       await sendProgress({
         type: 'error',
         message: error instanceof Error ? error.message : 'Unknown error occurred',
@@ -490,9 +557,9 @@ async function runWithLimit(tasks: (() => Promise<void>)[], limit: number) {
     await Promise.all(Array(limit).fill(0).map(worker));
 }
 
-async function searchPlaces(stadt: string, branche: string, maxBusinesses?: number): Promise<Place[]> {
+async function searchPlaces(stadt: string, branche: string, maxBusinesses?: number, sendProgress?: (data: any) => Promise<void>): Promise<Place[]> {
   const query = `${branche} in ${stadt}`;
-  console.log(`📍 Calling Google Places API with query: "${query}"`);
+  logger.log(`📍 Calling Google Places API with query: "${query}"`);
   
   const url = 'https://places.googleapis.com/v1/places:searchText';
   let allPlaces: Place[] = [];
@@ -500,32 +567,54 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
   let pageNumber = 1;
 
   do {
+    // ─── Key Management logic added ───
+    let apiKey: string | null = null;
+    while (!apiKey) {
+      apiKey = getNextAvailableKey();
+      if (!apiKey) {
+        logger.warn('⏳ No active API keys available. Waiting for new keys...');
+        if (sendProgress) {
+          await sendProgress({
+            type: 'blocked', 
+            level: 1, 
+            label: 'API Keys Exhausted',
+            message: 'Das Limit von 1000 Aufrufen pro API Key wurde erreicht. Bitte neue Keys in den Einstellungen hinzufügen.'
+          });
+        }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+    }
+    // ──────────────────────────────────
+
     const requestBody: any = { textQuery: query };
     if (pageToken) {
       requestBody.pageToken = pageToken;
     }
 
-    console.log(`📄 Fetching page ${pageNumber}...`);
+    logger.log(`📄 Fetching page ${pageNumber}... (Key: ...${apiKey.slice(-4)})`);
 
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Goog-Api-Key': GOOGLE_PLACES_API_KEY!,
+        'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours,places.rating,places.userRatingCount,nextPageToken',
       },
       body: JSON.stringify(requestBody),
     });
 
+    // Count every call (including pagination)
+    incrementApiKeyUsage(apiKey);
+
     if (!response.ok) {
-      const errorMsg = `Google Places API error: ${response.statusText}`;
-      console.error(`❌ ${errorMsg}`);
+      const errorMsg = `Google Places API error: ${response.status} ${response.statusText}`;
+      logger.error(`❌ ${errorMsg}`);
       throw new Error(errorMsg);
     }
 
     const data = await response.json();
     const places = data.places || [];
-    console.log(`📦 Page ${pageNumber} returned ${places.length} places`);
+    logger.log(`📦 Page ${pageNumber} returned ${places.length} places`);
 
     const mappedPlaces = places.map((place: any) => {
       let hours = undefined;
@@ -555,6 +644,6 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
     }
   } while (pageToken && (!maxBusinesses || allPlaces.length < maxBusinesses));
 
-  console.log(`✅ Total places found across all pages: ${allPlaces.length}`);
+  logger.log(`✅ Total places found across all pages: ${allPlaces.length}`);
   return allPlaces;
 }
