@@ -1,4 +1,5 @@
 import { Page, BrowserContext } from 'playwright';
+import * as cheerio from 'cheerio';
 import { extractNamesDetailed } from './extractNames';
 import { scrapeImprintLightbox } from './lightBoxScrape';
 import { normalizeOwnerNameString, normalizeOwnerNamesFromCandidates } from './owner-name-normalizer';
@@ -10,6 +11,7 @@ export const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlo
 export interface ScrapeResult {
   email: string | null;
   owner: string | null;
+  ownerSalutations: string | null;
   ownerFirstNames: string | null;
   ownerLastNames: string | null;
 }
@@ -23,13 +25,13 @@ const isResultComplete = (result: ScrapeResult, searchEmail: boolean, searchOwne
 
 const mergeScrapeResults = (base: ScrapeResult, next: ScrapeResult): ScrapeResult => ({
   email: base.email || next.email,
-  owner: base.owner || next.owner,
-  ownerFirstNames: base.ownerFirstNames || next.ownerFirstNames,
+  owner: base.owner || next.owner,  ownerSalutations: base.ownerSalutations || next.ownerSalutations,  ownerFirstNames: base.ownerFirstNames || next.ownerFirstNames,
   ownerLastNames: base.ownerLastNames || next.ownerLastNames,
 });
 
 interface OwnerExtractionResult {
   owner: string | null;
+  ownerSalutations: string | null;
   ownerFirstNames: string | null;
   ownerLastNames: string | null;
 }
@@ -255,6 +257,7 @@ export async function extractOwnerDetailsFromText(
 
   return {
     owner: normalized.ownerDisplay,
+    ownerSalutations: normalized.ownerSalutations,
     ownerFirstNames: normalized.ownerFirstNames,
     ownerLastNames: normalized.ownerLastNames,
   };
@@ -305,52 +308,100 @@ async function searchPageForOwner(page: Page, businessInfo: { name?: string, ind
     if (!text) text = await page.textContent('body');
     
     if (!text) {
-      return { owner: null, ownerFirstNames: null, ownerLastNames: null };
+      return { owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
     }
     return extractOwnerDetailsFromText(text, businessInfo, log);
   } catch (e) {
       log(`   ⚠️ Failed to search for owner: ${e}`);
   }
-  return { owner: null, ownerFirstNames: null, ownerLastNames: null };
+  return { owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
 }
 
 // HTTP Fallback function
-async function tryHttpScrape(url: string, domain: string, options: { searchEmail?: boolean; searchOwner?: boolean }, log: (msg: string) => void): Promise<ScrapeResult> {
-  const result: ScrapeResult = { email: null, owner: null, ownerFirstNames: null, ownerLastNames: null };
+async function fetchPage(url: string, log: (msg: string) => void): Promise<string | null> {
     try {
-        log(`   ⚡ Trying HTTP GET first for ${url}...`);
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout for HTTP
-        
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
         const response = await fetch(url, { 
             signal: controller.signal,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             } 
         });
         clearTimeout(timeoutId);
+        if (!response.ok) return null;
+        return await response.text();
+    } catch {
+        return null;
+    }
+}
 
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const text = await response.text();
+async function tryHttpScrape(url: string, domain: string, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string }, log: (msg: string) => void): Promise<ScrapeResult> {
+  const result: ScrapeResult = { email: null, owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
+    try {
+        log(`   ⚡ Trying HTTP GET first for ${url}...`);
+        const text = await fetchPage(url, log);
+        if (!text) throw new Error("HTTP Fetch failed");
         
         if (options.searchEmail) {
             const email = extractEmailsFromText(text, domain, log);
             if (email) result.email = email;
-            
-            // Check mailto links in HTML string via regex
             if (!result.email) {
                  const mailtoMatch = text.match(/href=["']mailto:([^"']+)["']/i);
                  if (mailtoMatch) {
-                     const email = cleanEmail(mailtoMatch[1].split('?')[0]);
-                     if (email && (isEmailFromDomain(email, domain, true) || isEmailFromDomain(email, domain, false))) {
-                         result.email = email;
+                     const emailMatch = cleanEmail(mailtoMatch[1].split('?')[0]);
+                     if (emailMatch && (isEmailFromDomain(emailMatch, domain, true) || isEmailFromDomain(emailMatch, domain, false))) {
+                         result.email = emailMatch;
                      }
                  }
             }
         }
 
-           // Owner extraction intentionally happens in Playwright where subpage targeting is controlled.
-        
+        const imprintPattern = getImprintPattern(options.country || 'de');
+        let rawHtmlToScrapeForOwner = text;
+
+        if (options.searchOwner || (!result.email && options.searchEmail)) {
+            const $ = cheerio.load(text);
+            let targetUrl = null;
+            $('a').each((_, el) => {
+                const href = $(el).attr('href');
+                if (href && (imprintPattern.test(href) || imprintPattern.test($(el).text()))) {
+                   if (href.startsWith('http')) targetUrl = href;
+                   else if (href.startsWith('/')) targetUrl = new URL(href, url).href;
+                   else targetUrl = new URL(`/${href}`, url).href;
+                }
+            });
+
+            if (targetUrl) {
+                log(`   ⚡ HTTP Fetching Imprint/Contact page: ${targetUrl}`);
+                const subpageText = await fetchPage(targetUrl, log);
+                if (subpageText) {
+                    rawHtmlToScrapeForOwner = subpageText;
+                    if (!result.email && options.searchEmail) {
+                        const email = extractEmailsFromText(subpageText, domain, log);
+                        if (email) result.email = email;
+                    }
+                }
+            }
+        }
+
+        if (options.searchOwner && !result.owner) {
+            const $ = cheerio.load(rawHtmlToScrapeForOwner);
+            $('script, style, nav, header, footer').remove();
+            const textToSearch = $('body').text().replace(/\s+/g, ' ');
+            const extracted = await extractNamesDetailed(textToSearch, { takeFirst: false });
+            if (extracted && extracted.names.length > 0) {
+               const normalized = normalizeOwnerNamesFromCandidates(extracted.names);
+               if (normalized.ownerDisplay) {
+                   log(`   ✅ Owner found via HTTP: ${normalized.ownerDisplay}`);
+                   result.owner = normalized.ownerDisplay;
+                   result.ownerSalutations = normalized.ownerSalutations;
+                   result.ownerFirstNames = normalized.ownerFirstNames;
+                   result.ownerLastNames = normalized.ownerLastNames;
+               }
+            }
+        }
+
         return result;
     } catch (e) {
         log(`   ⚠️ HTTP failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -426,6 +477,7 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
                const ownerResult = await searchPageForOwner(page, { name: businessName, industry }, logger);
                if (ownerResult.owner) {
                  result.owner = ownerResult.owner;
+                 result.ownerSalutations = ownerResult.ownerSalutations;
                  result.ownerFirstNames = ownerResult.ownerFirstNames;
                  result.ownerLastNames = ownerResult.ownerLastNames;
                }
@@ -518,6 +570,7 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
           const ownerResult = await searchPageForOwner(page, { name: businessName, industry }, logger);
           if (ownerResult.owner) {
             result.owner = ownerResult.owner;
+            result.ownerSalutations = ownerResult.ownerSalutations;
             result.ownerFirstNames = ownerResult.ownerFirstNames;
             result.ownerLastNames = ownerResult.ownerLastNames;
           }
@@ -543,7 +596,7 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
 export async function findContactInfo(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string } = {}): Promise<ScrapeResult> {
   const { searchEmail = true, searchOwner = true, country = 'de' } = options;
   const logger = log || console.log;
-  const result: ScrapeResult = { email: null, owner: null, ownerFirstNames: null, ownerLastNames: null };
+  const result: ScrapeResult = { email: null, owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
   const retryLimit = 1;
   const attemptTimeoutMs = 30000;
 
@@ -579,9 +632,10 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
           partialResult = mergeScrapeResults(partialResult, {
             email: lightboxResult.email,
             owner: lightboxResult.owner,
+            ownerSalutations: lightboxResult.ownerSalutations,
             ownerFirstNames: lightboxResult.ownerFirstNames,
             ownerLastNames: lightboxResult.ownerLastNames,
-          });
+          } as ScrapeResult);
         } else if (lightboxResult.lightboxFound) {
           logger('   ℹ️ Impressum lightbox found but no owner extracted.');
         } else {

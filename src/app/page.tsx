@@ -2,7 +2,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Upload, Download, Play, AlertCircle, CheckCircle, Loader } from 'lucide-react';
+import { Upload, Download, Play, AlertCircle, CheckCircle, Loader, ChevronDown, ChevronRight, Filter } from 'lucide-react';
 import SettingsTab from '@/components/SettingsTab';
 import { normalizeOwnerNameString } from '@/lib/owner-name-normalizer';
 
@@ -14,12 +14,14 @@ interface BusinessResult {
   website?: string;
   email?: string;
   owner?: string;
+  ownerSalutations?: string;
   ownerFirstNames?: string;
   ownerLastNames?: string;
   status?: string;
   rating?: number;
   reviews?: number;
   hours?: string;
+  price?: string;
 }
 
 type Language = 'de' | 'en';
@@ -36,6 +38,8 @@ const translations = {
     searchOwner: 'Geschäftsführer suchen',
     country: 'Land',
     maxBusinesses: 'Maximale Unternehmen pro Suche',
+    minPrice: 'Mindestpreis (€)',
+    maxPrice: 'Höchstpreis (€)',
     startButton: 'Scraping starten',
     cancelButton: 'Abbrechen',
     processing: 'Verarbeitung läuft...',
@@ -51,6 +55,7 @@ const translations = {
     rating: 'Bewertung',
     reviews: 'Anzahl Bewertungen',
     hours: 'Öffnungszeiten',
+    price: 'Preis',
     phone: 'Telefon',
     website: 'Website',
     howItWorks: 'So funktioniert es:',
@@ -74,6 +79,8 @@ const translations = {
     searchOwner: 'Search for business owners',
     country: 'Country',
     maxBusinesses: 'Max businesses per search',
+    minPrice: 'Min Price (€)',
+    maxPrice: 'Max Price (€)',
     startButton: 'Start Scraping',
     cancelButton: 'Cancel',
     processing: 'Processing...',
@@ -89,6 +96,7 @@ const translations = {
     rating: 'Rating',
     reviews: 'Reviews',
     hours: 'Opening Hours',
+    price: 'Price',
     phone: 'Phone',
     website: 'Website',
     howItWorks: 'How it works:',
@@ -138,7 +146,10 @@ export default function BusinessScraper() {
   const [searchOwner, setSearchOwner] = useState(true);
   const [country, setCountry] = useState('de');
   const [maxBusinesses, setMaxBusinesses] = useState<number | 'max' | ''>(60);
-  const [workerCount, setWorkerCount] = useState(2);
+  const [minPrice, setMinPrice] = useState<number | ''>('');
+  const [maxPrice, setMaxPrice] = useState<number | ''>('');
+  const [isFiltersOpen, setIsFiltersOpen] = useState(false);
+  const [workerCount, setWorkerCount] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [resumeSessionId, setResumeSessionId] = useState('');
   const [blockedInfo, setBlockedInfo] = useState<{ level: number; label: string; message: string } | null>(null);
@@ -240,6 +251,8 @@ export default function BusinessScraper() {
     formData.append('searchOwner', String(searchOwner));
     formData.append('country', country);
     formData.append('maxBusinesses', String(!maxBusinesses ? 20 : (maxBusinesses === 'max' ? 100000 : maxBusinesses)));
+    if (minPrice !== '') formData.append('minPrice', String(minPrice));
+    if (maxPrice !== '') formData.append('maxPrice', String(maxPrice));
     formData.append('workerCount', String(workerCount));
 
     const tempResults: BusinessResult[] = [];
@@ -341,9 +354,11 @@ export default function BusinessScraper() {
         t.city,
         t.industry,
         t.name,
+        t.price,
         t.phone,
         t.website,
         t.email,
+        'Anrede',
         `${t.owner} Vorname`,
         `${t.owner} Nachname`,
         t.owner,
@@ -354,6 +369,7 @@ export default function BusinessScraper() {
       ].join(','),
       ...results.map((r: BusinessResult) => {
         const fallback = normalizeOwnerNameString(r.owner);
+        const ownerSalutations = r.ownerSalutations ?? fallback.ownerSalutations ?? '';
         const ownerFirstNames = r.ownerFirstNames ?? fallback.ownerFirstNames ?? '';
         const ownerLastNames = r.ownerLastNames ?? fallback.ownerLastNames ?? '';
 
@@ -361,9 +377,11 @@ export default function BusinessScraper() {
           r.stadt,
           r.branche,
           r.name || '',
+          r.price || '',
           r.telefon || '',
           r.website || '',
           r.email || '',
+          ownerSalutations,
           ownerFirstNames,
           ownerLastNames,
           r.owner || '',
@@ -573,25 +591,72 @@ export default function BusinessScraper() {
                 </div>
               </div>
 
+              {/* Price Filter Collapsible */}
+              <div className="border border-gray-200 rounded-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setIsFiltersOpen(!isFiltersOpen)}
+                  className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+                >
+                  <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                    <Filter className="w-4 h-4" />
+                    <span>Filter</span>
+                    {(minPrice !== '' || maxPrice !== '') && (
+                      <span className="w-2 h-2 rounded-full bg-blue-500 ml-1"></span>
+                    )}
+                  </div>
+                  {isFiltersOpen ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                </button>
+                
+                {isFiltersOpen && (
+                  <div className="p-4 space-y-4 bg-white border-t border-gray-200">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-medium text-gray-700">{t.minPrice}</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={minPrice}
+                        onChange={(e) => setMinPrice(e.target.value === '' ? '' : parseInt(e.target.value))}
+                        className="w-24 px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="z.B. 10"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-medium text-gray-700">{t.maxPrice}</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={maxPrice}
+                        onChange={(e) => setMaxPrice(e.target.value === '' ? '' : parseInt(e.target.value))}
+                        className="w-24 px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="z.B. 50"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Worker Count – only relevant for high-volume (> 60) */}
               {(maxBusinesses === 'max' || (typeof maxBusinesses === 'number' && maxBusinesses > 60)) && (
                 <div className="flex items-center justify-between">
                   <label className="text-sm font-medium text-gray-700">
                     Maps Browser-Worker
-                    <span className="ml-1 text-xs text-gray-400">(RAM: &lt;8 GB→1, 8-16 GB→2, &gt;16 GB→3)</span>
+                    <span className="ml-1 text-xs text-gray-400">(RAM: &le;16 GB→1, &gt;16 GB→2)</span>
                   </label>
                   <div className="flex gap-1">
-                    {[1, 2, 3].map(n => (
+                    {[0, 1, 2].map(n => (
                       <button
                         key={n}
                         onClick={() => setWorkerCount(n)}
-                        className={`w-10 h-9 rounded-lg text-sm font-semibold transition-colors ${
+                        className={`px-3 h-9 rounded-lg text-sm font-semibold transition-colors ${
                           workerCount === n
                             ? 'bg-indigo-600 text-white'
                             : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                         }`}
                       >
-                        {n}
+                        {n === 0 ? 'Auto' : n}
                       </button>
                     ))}
                   </div>
@@ -805,6 +870,7 @@ export default function BusinessScraper() {
                       <th className="px-4 py-2 text-left font-semibold">{t.city}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.industry}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.name}</th>
+                      <th className="px-4 py-2 text-left font-semibold">{t.price}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.phone}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.website}</th>
                       <th className="px-4 py-2 text-left font-semibold">{t.rating}</th>
@@ -820,6 +886,7 @@ export default function BusinessScraper() {
                         <td className="px-4 py-2">{r.stadt}</td>
                         <td className="px-4 py-2">{r.branche}</td>
                         <td className="px-4 py-2">{r.name || '-'}</td>
+                        <td className="px-4 py-2">{r.price || '-'}</td>
                         <td className="px-4 py-2">{r.telefon || '-'}</td>
                         <td className="px-4 py-2">
                           {r.website ? (

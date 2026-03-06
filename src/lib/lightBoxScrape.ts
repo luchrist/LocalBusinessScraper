@@ -11,6 +11,7 @@ interface ScraperOptions {
 
 export interface LightboxScrapeResult {
   owner: string | null;
+  ownerSalutations: string | null;
   ownerFirstNames: string | null;
   ownerLastNames: string | null;
   email: string | null;
@@ -92,6 +93,7 @@ export async function scrapeImprintLightbox(url: string, options?: ScraperOption
   const log = options?.log ?? ((msg: string) => logger.log(msg));
   const result: LightboxScrapeResult = {
     owner: null,
+    ownerSalutations: null,
     ownerFirstNames: null,
     ownerLastNames: null,
     email: null,
@@ -217,6 +219,7 @@ export async function scrapeImprintLightbox(url: string, options?: ScraperOption
       if (combinedNames.length > 0) {
         const normalized = normalizeOwnerNamesFromCandidates(combinedNames);
         result.owner = normalized.ownerDisplay;
+        result.ownerSalutations = normalized.ownerSalutations;
         result.ownerFirstNames = normalized.ownerFirstNames;
         result.ownerLastNames = normalized.ownerLastNames;
         log(`[Scraper] Regex-Owner gefunden: ${result.owner}`);
@@ -227,6 +230,7 @@ export async function scrapeImprintLightbox(url: string, options?: ScraperOption
     if (ownerCandidates.length > 0) {
       const normalized = normalizeOwnerNamesFromCandidates(ownerCandidates);
       result.owner = normalized.ownerDisplay;
+      result.ownerSalutations = normalized.ownerSalutations;
       result.ownerFirstNames = normalized.ownerFirstNames;
       result.ownerLastNames = normalized.ownerLastNames;
       log(`[Scraper] Regex-Owner gefunden: ${result.owner}`);
@@ -238,6 +242,7 @@ export async function scrapeImprintLightbox(url: string, options?: ScraperOption
       if (names.length > 0) {
         const normalized = normalizeOwnerNamesFromCandidates(names);
         result.owner = normalized.ownerDisplay;
+        result.ownerSalutations = normalized.ownerSalutations;
         result.ownerFirstNames = normalized.ownerFirstNames;
         result.ownerLastNames = normalized.ownerLastNames;
         log(`[Scraper] Regex-Owner aus Lightbox-Text gefunden: ${result.owner}`);

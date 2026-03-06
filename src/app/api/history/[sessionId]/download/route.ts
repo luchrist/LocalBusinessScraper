@@ -33,6 +33,7 @@ export async function GET(
 
     const csvData = places.map((p: any) => {
       const fallback = normalizeOwnerNameString(p.owner);
+      const ownerSalutations = p.owner_salutations ?? fallback.ownerSalutations;
       const ownerFirstNames = p.owner_first_names ?? fallback.ownerFirstNames;
       const ownerLastNames = p.owner_last_names ?? fallback.ownerLastNames;
 
@@ -44,6 +45,7 @@ export async function GET(
       Telefon: p.phone,
       Website: p.website,
       Email: p.email,
+      'Anrede': ownerSalutations,
       'Geschäftsführer Vorname': ownerFirstNames,
       'Geschäftsführer Nachname': ownerLastNames,
       'Geschäftsführer': p.owner,

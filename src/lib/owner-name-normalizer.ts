@@ -2,12 +2,14 @@ export const OWNER_LIST_SEPARATOR = '|';
 
 export interface ParsedOwnerName {
   fullName: string;
+  salutation: string | null;
   firstName: string;
   lastName: string;
 }
 
 export interface OwnerNameNormalization {
   ownerDisplay: string | null;
+  ownerSalutations: string | null;
   ownerFirstNames: string | null;
   ownerLastNames: string | null;
   owners: ParsedOwnerName[];
@@ -37,15 +39,24 @@ function splitOwnerCandidates(ownerText: string): string[] {
 }
 
 function splitNameByRule(fullName: string): ParsedOwnerName {
-  const parts = fullName
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean);
+  let salutation: string | null = null;
+  let remainingName = fullName.replace(/\s+/g, ' ').trim();
+
+  const lowerName = remainingName.toLowerCase();
+  if (lowerName.startsWith('herr ')) {
+    salutation = 'Herr';
+    remainingName = remainingName.substring(5).trim();
+  } else if (lowerName.startsWith('frau ')) {
+    salutation = 'Frau';
+    remainingName = remainingName.substring(5).trim();
+  }
+
+  const parts = remainingName.split(' ').filter(Boolean);
 
   if (parts.length <= 1) {
     return {
       fullName,
+      salutation,
       firstName: '',
       lastName: parts[0] ?? '',
     };
@@ -54,6 +65,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
   if (parts.length === 2) {
     return {
       fullName,
+      salutation,
       firstName: parts[0],
       lastName: parts[1],
     };
@@ -62,6 +74,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
   if (parts.length === 3) {
     return {
       fullName,
+      salutation,
       firstName: `${parts[0]} ${parts[1]}`,
       lastName: parts[2],
     };
@@ -70,6 +83,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
   if (parts.length === 4) {
     return {
       fullName,
+      salutation,
       firstName: `${parts[0]} ${parts[1]}`,
       lastName: `${parts[2]} ${parts[3]}`,
     };
@@ -78,6 +92,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
   const splitIndex = Math.ceil(parts.length / 2);
   return {
     fullName,
+    salutation,
     firstName: parts.slice(0, splitIndex).join(' '),
     lastName: parts.slice(splitIndex).join(' '),
   };
@@ -95,6 +110,11 @@ export function normalizeOwnerNamesFromCandidates(candidates: string[]): OwnerNa
 
   return {
     ownerDisplay: uniqueCandidates.length > 0 ? uniqueCandidates.join(', ') : null,
+    ownerSalutations: joinList(
+      owners
+        .map((owner) => owner.salutation)
+        .filter((s): s is string => typeof s === 'string' && s.length > 0)
+    ),
     ownerFirstNames: joinList(owners.map((owner) => owner.firstName)),
     ownerLastNames: joinList(owners.map((owner) => owner.lastName)),
     owners,
@@ -106,6 +126,7 @@ export function normalizeOwnerNameString(ownerText: string | null | undefined): 
   if (!raw) {
     return {
       ownerDisplay: null,
+      ownerSalutations: null,
       ownerFirstNames: null,
       ownerLastNames: null,
       owners: [],

@@ -181,8 +181,7 @@ export class ScraperPool {
   static recommendedWorkerCount(uiOverride?: number): number {
     if (uiOverride && uiOverride > 0) return uiOverride;
     const gbRam = os.totalmem() / 1024 ** 3;
-    if (gbRam >= 16) return 3;
-    if (gbRam >= 8)  return 2;
+    if (gbRam > 16) return 2;
     return 1;
   }
 

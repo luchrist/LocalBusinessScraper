@@ -41,12 +41,13 @@ function releaseWorkerLock(): void {
 
 async function getWorker(): Promise<Worker | null> {
   if (!llmAvailable) return null;
-  if (llmWorker) return llmWorker;
 
   if (isInitializing && initPromise) {
     await initPromise;
     return llmWorker;
   }
+
+  if (llmWorker) return llmWorker;
 
   isInitializing = true;
   initPromise = new Promise<void>((resolve) => {

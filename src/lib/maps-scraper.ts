@@ -34,13 +34,71 @@ export interface PlaceResult {
     hours?: string;
     address?: string;
     placeKey?: string;   // dedup key extracted from Maps URL
+    price?: string;
 }
 
 export class GoogleMapsScraper {
     private page: Page;
+    private minPrice?: number;
+    private maxPrice?: number;
 
-    constructor(page: Page) {
+    constructor(page: Page, minPrice?: number, maxPrice?: number) {
         this.page = page;
+        this.minPrice = minPrice;
+        this.maxPrice = maxPrice;
+    }
+
+    private parsePrice(priceString: string): { lowerBound: number, upperBound: number } | null {
+        if (!priceString) return null;
+        
+        // Match "20-30€" or "€20-€30" or "€ 20-30" etc
+        const rangeMatch = priceString.match(/(\d+)[^\d]+(\d+)/);
+        if (rangeMatch) {
+            return {
+                lowerBound: parseInt(rangeMatch[1], 10),
+                upperBound: parseInt(rangeMatch[2], 10)
+            };
+        }
+
+        // Match "Mehr als 100€" or "More than 100€" etc
+        const moreThanMatch = priceString.match(/(mehr als|more than|>|>|ab)\s*.*?(\d+)/i);
+        if (moreThanMatch) {
+            return {
+                lowerBound: parseInt(moreThanMatch[2], 10),
+                upperBound: Infinity
+            };
+        }
+
+        // Match "X €" or "€ X" or standard single numbers
+        const singleNumberMatch = priceString.match(/(\d+)/);
+        if (singleNumberMatch) {
+            const val = parseInt(singleNumberMatch[1], 10);
+            return { lowerBound: val, upperBound: val };
+        }
+
+        // Euro symbols (€, €€, €€€)
+        const euroCount = (priceString.match(/€/g) || []).length;
+        if (euroCount > 0) {
+            if (euroCount === 1) return { lowerBound: 0, upperBound: 10 };
+            if (euroCount === 2) return { lowerBound: 10, upperBound: 25 };
+            if (euroCount === 3) return { lowerBound: 25, upperBound: 50 };
+            if (euroCount >= 4) return { lowerBound: 50, upperBound: Infinity };
+        }
+
+        return null;
+    }
+
+    private matchesPrice(priceString?: string): boolean {
+        // If no price specified, keep it
+        if (!priceString) return true;
+        
+        const bounds = this.parsePrice(priceString);
+        if (!bounds) return true;
+
+        if (this.minPrice !== undefined && bounds.upperBound < this.minPrice) return false;
+        if (this.maxPrice !== undefined && bounds.lowerBound > this.maxPrice) return false;
+
+        return true;
     }
 
     // ── Block detection helpers ────────────────────────────────────────────
@@ -282,7 +340,12 @@ export class GoogleMapsScraper {
 
                         seen.add(label);
                         noNew = 0;
-                        yield details;
+                        
+                        if (this.matchesPrice(details.price)) {
+                            yield details;
+                        } else {
+                            logger.log(`[Maps] Skipped "${label}" due to price filter (Found: ${details.price})`);
+                        }
                     }
 
                     // Ensure list panel is still visible
@@ -370,6 +433,22 @@ export class GoogleMapsScraper {
                     const match = reviewLabel.match(/(\d[\d,]*)/);
                     if (match) {
                         result.reviews = parseInt(match[0].replace(/,/g, ''));
+                    }
+                }
+            } catch { }
+
+            // Price Extractions
+            try {
+                // The price info is usually near the rating or in a general textual description right below the title.
+                // It either contains € symbols, or numbers with €. We can look for spans containing '€'.
+                const spans = await this.page.$$eval('span', els => els.map(e => e.textContent || ''));
+                for (const text of spans) {
+                    if (text.includes('€')) {
+                        // verify it looks like a price info
+                        if (/€+|€\s*\d+|\d+\s*-\s*\d+\s*€|mehr als\s*\d+\s*€|more than/i.test(text)) {
+                            result.price = text.trim();
+                            break;
+                        }
                     }
                 }
             } catch { }

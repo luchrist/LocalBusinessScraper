@@ -1,5 +1,6 @@
 //api/scrape
 import { logger } from '@/lib/logger';
+import os from 'os';
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 import { chromium, BrowserContext } from 'playwright';
@@ -28,11 +29,11 @@ interface BusinessResult {
   telefon?: string;
   website?: string;
   email?: string;
-  owner?: string;
-  ownerFirstNames?: string;
+  owner?: string;  ownerSalutations?: string;  ownerFirstNames?: string;
   ownerLastNames?: string;
   status: string;
   hours?: string;
+  price?: string;
   rating?: number;
   reviews?: number;
 }
@@ -44,6 +45,7 @@ interface Place {
   phone: string;
   website: string;
   hours?: string;
+  price?: string;
   rating?: number;
   reviews?: number;
 }
@@ -111,7 +113,12 @@ export async function POST(request: NextRequest) {
       const workerCountRaw = parseInt(formData.get('workerCount') as string) || 0;
       const maxBusinessesStr = formData.get('maxBusinesses') as string;
       const maxBusinesses = maxBusinessesStr === 'max' ? Infinity : parseInt(maxBusinessesStr) || Infinity;
-      
+
+      const minPriceStr = formData.get('minPrice') as string;
+      const minPrice = minPriceStr ? parseInt(minPriceStr) : undefined;
+      const maxPriceStr = formData.get('maxPrice') as string;
+      const maxPrice = maxPriceStr ? parseInt(maxPriceStr) : undefined;
+
       // Clear logs at the start of a new scrape
       logger.clear();
 
@@ -293,12 +300,14 @@ export async function POST(request: NextRequest) {
               rating: place.rating,
               reviews: place.reviews,
               hours: place.hours,
+              price: place.price,
               address: place.address,
               placeKey: placeKey,
             });
 
             let email: string | null = null;
             let owner: string | null = null;
+            let ownerSalutations: string | null = null;
             let ownerFirstNames: string | null = null;
             let ownerLastNames: string | null = null;
             let status = 'no_website';
@@ -317,6 +326,7 @@ export async function POST(request: NextRequest) {
               if (searchEmail) email = contactInfo.email;
               if (searchOwner) {
                 owner = contactInfo.owner;
+                ownerSalutations = contactInfo.ownerSalutations;
                 ownerFirstNames = contactInfo.ownerFirstNames;
                 ownerLastNames = contactInfo.ownerLastNames;
               }
@@ -337,6 +347,7 @@ export async function POST(request: NextRequest) {
             updatePlaceEnriched(db, dbId, {
               email: email || null,
               owner: owner || null,
+              ownerSalutations: ownerSalutations || null,
               ownerFirstNames: ownerFirstNames || null,
               ownerLastNames: ownerLastNames || null,
               status: status as EnrichStatus,
@@ -347,9 +358,10 @@ export async function POST(request: NextRequest) {
               telefon: place.phone, website: place.website,
               email: email || undefined,
               owner: owner || undefined,
+              ownerSalutations: ownerSalutations || undefined,
               ownerFirstNames: ownerFirstNames || undefined,
               ownerLastNames: ownerLastNames || undefined,
-              status, hours: place.hours, rating: place.rating, reviews: place.reviews,
+              status, hours: place.hours, price: place.price, rating: place.rating, reviews: place.reviews,
             };
             processedBusinesses++;
             await sendProgress({
@@ -385,9 +397,12 @@ export async function POST(request: NextRequest) {
               await processPlace(p);
             }),
           ];
-          // Limit concurrency to avoid overloading system resources (especially when running local LLM)
-          // Default reduced from 10 to 3 for stability
-          await runWithLimit(tasks, singleWorker ? 1 : 3);
+          const gbRam = os.totalmem() / 1024 ** 3;
+          let enrichmentConcurrency = 1;
+          if (gbRam > 16) enrichmentConcurrency = 3;
+          else if (gbRam > 8) enrichmentConcurrency = 2;
+
+          await runWithLimit(tasks, singleWorker ? 1 : enrichmentConcurrency);
         } else if (mapsPaused) {
           // Maps is blocked – skip scraping rows, enrichment for prior results is already done
           logger.log(`[Scraping] Skipping "${branche}" in "${stadt}" – Maps is paused (block detected)`);
@@ -397,7 +412,7 @@ export async function POST(request: NextRequest) {
           const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results });
           const worker = await pool.acquire();
           try {
-            const scraper = new GoogleMapsScraper(worker.page!);
+            const scraper = new GoogleMapsScraper(worker.page!, minPrice, maxPrice);
             await scraper.search(stadt, branche);
 
             let scraped = 0;
@@ -427,6 +442,7 @@ export async function POST(request: NextRequest) {
 
               let email: string | null = null;
               let owner: string | null = null;
+              let ownerSalutations: string | null = null;
               let ownerFirstNames: string | null = null;
               let ownerLastNames: string | null = null;
               let enrichStatus = 'no_website';
@@ -456,11 +472,13 @@ export async function POST(request: NextRequest) {
                 name: place.name, website: place.website ?? undefined,
                 phone: place.phone ?? undefined, rating: place.rating ?? undefined,
                 reviews: place.reviews ?? undefined, hours: place.hours ?? undefined,
+                price: (place as any).price ?? undefined,
                 address: place.address ?? undefined, placeKey: placeKey2,
               });
               updatePlaceEnriched(db, dbId, {
                 email: email || null,
                 owner: owner || null,
+                ownerSalutations: ownerSalutations || null,
                 ownerFirstNames: ownerFirstNames || null,
                 ownerLastNames: ownerLastNames || null,
                 status: enrichStatus as EnrichStatus,
@@ -471,6 +489,7 @@ export async function POST(request: NextRequest) {
                 telefon: place.phone ?? undefined, website: place.website ?? undefined,
                 email: email || undefined,
                 owner: owner || undefined,
+                ownerSalutations: ownerSalutations || undefined,
                 ownerFirstNames: ownerFirstNames || undefined,
                 ownerLastNames: ownerLastNames || undefined,
                 status: enrichStatus, hours: place.hours ?? undefined,

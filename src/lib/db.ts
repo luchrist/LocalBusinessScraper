@@ -54,10 +54,12 @@ export interface PlaceRow {
   rating: number | null;
   reviews: number | null;
   hours: string | null;
+  price: string | null;
   address: string | null;
   place_key: string | null;   // Google Maps internal ID / dedup key
   email: string | null;
   owner: string | null;
+  owner_salutations: string | null;
   owner_first_names: string | null;
   owner_last_names: string | null;
   enrich_status: EnrichStatus;
@@ -118,10 +120,12 @@ export function openDb(sessionId: string): Database.Database {
       rating        REAL,
       reviews       INTEGER,
       hours         TEXT,
+      price         TEXT,
       address       TEXT,
       place_key     TEXT,
       email         TEXT,
       owner         TEXT,
+      owner_salutations TEXT,
       owner_first_names TEXT,
       owner_last_names  TEXT,
       enrich_status TEXT NOT NULL DEFAULT 'pending',
@@ -136,8 +140,10 @@ export function openDb(sessionId: string): Database.Database {
 
   // Migration: add max_results column to existing DBs
   try { db.exec(`ALTER TABLE jobs ADD COLUMN max_results INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE places ADD COLUMN price TEXT`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_first_names TEXT`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_last_names TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE places ADD COLUMN owner_salutations TEXT`); } catch {}
 
   dbCache.set(sessionId, db);
   return db;
@@ -264,6 +270,7 @@ export function insertPlace(
     rating?: number;
     reviews?: number;
     hours?: string;
+    price?: string;
     address?: string;
     placeKey?: string;
   }
@@ -272,13 +279,13 @@ export function insertPlace(
   const enrichStatus: EnrichStatus = p.website ? 'pending' : 'no_website';
   db.prepare(`
     INSERT INTO places
-      (id, session_id, job_id, name, website, phone, rating, reviews, hours, address, place_key, enrich_status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, session_id, job_id, name, website, phone, rating, reviews, hours, price, address, place_key, enrich_status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, sessionId, jobId,
     p.name, p.website ?? null, p.phone ?? null,
     p.rating ?? null, p.reviews ?? null,
-    p.hours ?? null, p.address ?? null, p.placeKey ?? null,
+    p.hours ?? null, p.price ?? null, p.address ?? null, p.placeKey ?? null,
     enrichStatus, Date.now()
   );
   return id;
@@ -309,6 +316,7 @@ export function updatePlaceEnriched(
   data: {
     email?: string | null;
     owner?: string | null;
+    ownerSalutations?: string | null;
     ownerFirstNames?: string | null;
     ownerLastNames?: string | null;
     status: EnrichStatus;
@@ -316,11 +324,12 @@ export function updatePlaceEnriched(
 ) {
   db.prepare(`
     UPDATE places
-    SET email = ?, owner = ?, owner_first_names = ?, owner_last_names = ?, enrich_status = ?
+    SET email = ?, owner = ?, owner_salutations = ?, owner_first_names = ?, owner_last_names = ?, enrich_status = ?
     WHERE id = ?
   `).run(
     data.email ?? null,
     data.owner ?? null,
+    data.ownerSalutations ?? null,
     data.ownerFirstNames ?? null,
     data.ownerLastNames ?? null,
     data.status,
