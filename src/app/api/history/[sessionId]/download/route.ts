@@ -52,6 +52,7 @@ export async function GET(
       'Geschäftsführer': p.owner,
       Status: p.enrich_status,
       'Öffnungszeiten': p.hours,
+      Preis: p.price,
       Bewertung: p.rating,
       'Anzahl Bewertungen': p.reviews,
       };

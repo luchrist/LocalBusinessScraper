@@ -8,6 +8,67 @@ export const EMAIL_REGEX = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
 export const OBFUSCATED_EMAIL_REGEX = /([\w.+\-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|\<at\>|at|AT|ät))\s*([A-Za-z0-9.\-]+)\.([A-Za-z]{2,})/gi;
 export const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net', 'aol.com', 'freenet.de', 'icloud.com', 't-online.de', 'live.com', 'protonmail.com', 'yandex.com'];
 
+// Real TLDs ordered longest-first so matching is greedy (e.g. .co.uk wins over .co)
+const VALID_TLDS = [
+  // Multi-part second-level TLDs
+  'co.uk','co.at','co.nz','co.za','co.jp','co.in','co.id','co.kr','co.il','co.th',
+  'com.au','com.br','com.mx','com.ar','com.tr','com.sg','com.pk','com.ua','com.pl',
+  'org.uk','net.au','net.nz','gov.uk','gov.au','ac.uk','ac.nz',
+  // Generic TLDs
+  'com','net','org','edu','gov','mil','int',
+  // Common ccTLDs (2-letter)
+  'de','at','ch','uk','fr','it','es','nl','be','pl','cz','sk','hu','ro','bg','hr',
+  'si','rs','ba','me','mk','al','lt','lv','ee','fi','se','no','dk','is','ie','pt',
+  'gr','cy','mt','lu','li','mc','sm','va','ad','by','ua','ru','kz',
+  'us','ca','mx','br','ar','cl','co','pe','ve','ec','bo','py','uy',
+  'au','nz','sg','jp','cn','kr','in','id','my','th','vn','ph','hk','tw',
+  'za','eg','ma','ng','ke','gh','tz','et','ug',
+  // Common new TLDs
+  'info','biz','mobi','name','pro','tel','travel','jobs','museum','aero','coop',
+  'app','dev','io','ai','cloud','digital','online','store','shop','tech','media',
+  'agency','studio','design','solutions','services','consulting','marketing',
+  'gmbh','company','healthcare','finance','legal','lawyer','dental','clinic',
+  'photography','photos','restaurant','hotel','cafe','bar','pub',
+  'berlin','hamburg','munich','koeln','wien','swiss',
+  'eu','asia','global','world','international',
+].sort((a, b) => b.length - a.length); // longest first for greedy match
+
+/**
+ * Truncates the domain part of an email to end after the first valid TLD.
+ * E.g. "user@example.deRathaus" → "user@example.de"
+ * Greedy: ".co.uk" wins over ".co", ".com" wins over ".co"
+ */
+export function truncateEmailToValidTLD(email: string): string {
+  const atIdx = email.indexOf('@');
+  if (atIdx === -1) return email;
+  const local = email.slice(0, atIdx);
+  const domain = email.slice(atIdx + 1).toLowerCase();
+  const originalDomain = email.slice(atIdx + 1);
+
+  // Try each TLD longest-first (greedy). A valid TLD occurrence must be preceded
+  // by at least one label character (not a dot), ensuring it is an actual TLD
+  // segment and not a sub-label. We truncate everything after the match so
+  // garbage like ".deRathaus" becomes ".de".
+  // Since VALID_TLDS is sorted longest-first, ".design" will match before ".de",
+  // so "user@foo.design" stays intact while "user@foo.deRathaus" → "user@foo.de".
+  for (const tld of VALID_TLDS) {
+    const suffix = '.' + tld;
+    let searchFrom = 0;
+    while (searchFrom < domain.length) {
+      const pos = domain.indexOf(suffix, searchFrom);
+      if (pos === -1) break;
+      const endPos = pos + suffix.length;
+      // The character before the dot must be a label char (not another dot)
+      if (pos === 0 || domain[pos - 1] === '.') { searchFrom = endPos; continue; }
+      // Valid match – truncate everything after this TLD
+      return local + '@' + originalDomain.slice(0, endPos);
+    }
+  }
+
+  // No known TLD found – return as-is
+  return email;
+}
+
 export interface ScrapeResult {
   email: string | null;
   owner: string | null;
@@ -77,6 +138,11 @@ export function cleanEmail(email: string): string | null {
   
   // Remove common trailing punctuation/garbage that might be captured
   cleaned = cleaned.replace(/[.,;:%]+$/, '');
+
+  // Truncate domain to the last valid TLD (e.g. "foo@bar.deRathaus" → "foo@bar.de")
+  if (cleaned.includes('@')) {
+    cleaned = truncateEmailToValidTLD(cleaned);
+  }
 
   if (cleaned && /^[A-Za-z]/.test(cleaned) && cleaned.includes('@')) {
     return cleaned;

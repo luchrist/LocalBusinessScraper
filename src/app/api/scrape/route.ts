@@ -587,6 +587,7 @@ export async function POST(request: NextRequest) {
                   ownerFirstNames: ownerFirstNames || undefined,
                   ownerLastNames: ownerLastNames || undefined,
                   status: enrichStatus, hours: place.hours ?? undefined,
+                  price: (place as any).price ?? undefined,
                   rating: place.rating ?? undefined, reviews: place.reviews ?? undefined,
                 };
                 
