@@ -268,7 +268,16 @@ export async function POST(request: NextRequest) {
       // ── Sort searches into a single Task array to run sequentially ──
       const allTasks: (() => Promise<void>)[] = [];
 
-      for (const row of data) {
+      // Find last row that needs the Maps browser so it can be closed early
+      let lastScrapingRowIdx = -1;
+      for (let i = data.length - 1; i >= 0; i--) {
+        const em = (data[i].max_results != null && data[i].max_results! > 0) ? data[i].max_results! : maxBusinesses;
+        if (em > 60) { lastScrapingRowIdx = i; break; }
+      }
+      let poolClosed = false;
+
+      for (let rowIdx = 0; rowIdx < data.length; rowIdx++) {
+        const row = data[rowIdx];
         const stadt = row.stadt!;
         const branche = row.branche!;
         const effectiveMax = (row.max_results != null && row.max_results > 0)
@@ -467,8 +476,11 @@ export async function POST(request: NextRequest) {
           await runWithLimit(tasks, enrichmentConcurrency);
         } else if (mapsPaused) {
           // Maps is blocked – skip scraping rows, enrichment for prior results is already done
-          logger.log(`[Scraping] Skipping "${branche}" in "${stadt}" – Maps is paused (block detected)`);
-          return;        } else {
+          logger.log(`[Scraping] Skipping "${branche}" in "${stadt}" – Maps is paused (block detected)`);          if (rowIdx === lastScrapingRowIdx && !poolClosed) {
+            logger.log('[Pool] Last scraping row skipped due to block. Closing Maps worker pool early to free RAM.');
+            await pool.close();
+            poolClosed = true;
+          }          return;        } else {
           // ── SCRAPING PATH ──────────────────────────────────────────────────
           // Create a job row in SQLite so place FK is satisfied
           const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results });
@@ -620,6 +632,12 @@ export async function POST(request: NextRequest) {
             try { await worker.resetContext(); } catch {}
             pool.release(worker);
           }
+          // Close the Maps browser immediately once the last scraping task is done
+          if (rowIdx === lastScrapingRowIdx && !poolClosed) {
+            logger.log('[Pool] Last scraping task done. Closing Maps worker pool early to free RAM.');
+            await pool.close();
+            poolClosed = true;
+          }
         }
         };
 
@@ -629,7 +647,7 @@ export async function POST(request: NextRequest) {
       // Execute sequentially (no parallel API / Scraping)
       await runWithLimit(allTasks, 1);
 
-      if (hasScrapingRows) {
+      if (hasScrapingRows && !poolClosed) {
         logger.log('[Pool] All tasks finished. Shutting down Maps worker pool to free RAM.');
         await pool.close();
       }
