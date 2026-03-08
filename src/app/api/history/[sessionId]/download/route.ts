@@ -6,11 +6,34 @@ import * as XLSX from 'xlsx';
 import { getAllPlaces } from '@/lib/db';
 import { normalizeOwnerNameString } from '@/lib/owner-name-normalizer';
 
+function isInitialOnly(name: string): boolean {
+  // Matches a single letter (including umlauts) followed by a dot, e.g. "M."
+  return /^[A-Za-z\u00C0-\u024F]\.$/.test(name.trim());
+}
+
+function classifyOwner(
+  ownerSalutations: string | null,
+  ownerFirstNames: string | null,
+  ownerLastNames: string | null,
+): { isAnredeNachname: boolean; isFirstnameNoAnrede: boolean } {
+  const hasSalutation = !!(ownerSalutations?.trim());
+  const hasLastName = !!(ownerLastNames?.trim());
+  const firstNames = (ownerFirstNames ?? '').split('|').map(s => s.trim()).filter(Boolean);
+  const hasAnyRealFirstName = firstNames.some(fn => !isInitialOnly(fn));
+  const allFirstNamesAbsentOrInitial =
+    firstNames.length === 0 || firstNames.every(fn => isInitialOnly(fn));
+  return {
+    isAnredeNachname: hasLastName && (hasSalutation || allFirstNamesAbsentOrInitial),
+    isFirstnameNoAnrede: hasAnyRealFirstName && !hasSalutation,
+  };
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
+  const splitMode = new URL(request.url).searchParams.get('split') === 'true';
   if (!sessionId) {
     return NextResponse.json({ error: 'Session ID required' }, { status: 400 });
   }
@@ -57,6 +80,46 @@ export async function GET(
       'Anzahl Bewertungen': p.reviews,
       };
     });
+
+    if (splitMode) {
+      const ohneNameRows = [] as typeof csvData;
+      const ohneEmailRows = [] as typeof csvData;
+      const anredeNachnameRows = [] as typeof csvData;
+      const vornameOhneAnredeRows = [] as typeof csvData;
+
+      for (let i = 0; i < places.length; i++) {
+        const p = places[i];
+        const row = csvData[i];
+        if (!p.name?.trim()) ohneNameRows.push(row);
+        if (!p.email?.trim()) ohneEmailRows.push(row);
+        const { isAnredeNachname, isFirstnameNoAnrede } = classifyOwner(
+          row['Anrede'],
+          row['Geschäftsführer Vorname'],
+          row['Geschäftsführer Nachname'],
+        );
+        if (isAnredeNachname) anredeNachnameRows.push(row);
+        if (isFirstnameNoAnrede) vornameOhneAnredeRows.push(row);
+      }
+
+      const wbSplit = XLSX.utils.book_new();
+      const appendSheet = (data: typeof csvData, name: string) => {
+        XLSX.utils.book_append_sheet(wbSplit, XLSX.utils.json_to_sheet(data), name);
+      };
+      appendSheet(ohneNameRows, 'Ohne Name');
+      appendSheet(ohneEmailRows, 'Ohne Email');
+      appendSheet(anredeNachnameRows, 'Anrede + Nachname');
+      appendSheet(vornameOhneAnredeRows, 'Vorname ohne Anrede');
+
+      const xlsxBuffer = XLSX.write(wbSplit, { type: 'buffer', bookType: 'xlsx' });
+      db.close();
+      db = null;
+      return new NextResponse(xlsxBuffer, {
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': `attachment; filename="results-split-${sessionId}.xlsx"`,
+        },
+      });
+    }
 
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(csvData);

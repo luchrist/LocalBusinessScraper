@@ -46,6 +46,8 @@ const translations = {
     leads: 'Leads',
     results: 'Ergebnisse',
     download: 'CSV Download',
+    downloadAll: 'Alle (CSV)',
+    downloadSplit: 'Aufgeteilt (Excel)',
     city: 'Stadt',
     industry: 'Branche',
     name: 'Name',
@@ -87,6 +89,8 @@ const translations = {
     leads: 'Leads',
     results: 'Results',
     download: 'CSV Download',
+    downloadAll: 'All (CSV)',
+    downloadSplit: 'Split (Excel)',
     city: 'City',
     industry: 'Industry',
     name: 'Name',
@@ -825,13 +829,26 @@ export default function BusinessScraper() {
                   <CheckCircle className="w-6 h-6 mr-2 text-green-500" />
                   {t.results} ({results.length})
                 </h2>
-                <button
-                  onClick={downloadResults}
-                  className="bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 transition-colors flex items-center"
-                >
-                  <Download className="w-4 h-4 mr-2" />
-                  {t.download}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={downloadResults}
+                    className="bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 transition-colors flex items-center text-sm"
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    {t.downloadAll}
+                  </button>
+                  {sessionId && (
+                    <a
+                      href={`/api/history/${sessionId}/download?split=true`}
+                      className="bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors flex items-center text-sm"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <Download className="w-4 h-4 mr-2" />
+                      {t.downloadSplit}
+                    </a>
+                  )}
+                </div>
               </div>
               
               <div 
@@ -969,14 +986,24 @@ export default function BusinessScraper() {
                              {session.total_jobs}
                            </td>
                            <td className="px-6 py-4">
-                             <a
-                               href={`/api/history/${session.id}/download`}
-                               className="font-medium text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
-                               target="_blank"
-                               rel="noopener noreferrer"
-                             >
-                               <Download className="w-4 h-4" /> Download
-                             </a>
+                             <div className="flex flex-col gap-1">
+                               <a
+                                 href={`/api/history/${session.id}/download`}
+                                 className="font-medium text-indigo-600 hover:text-indigo-800 flex items-center gap-1 whitespace-nowrap"
+                                 target="_blank"
+                                 rel="noopener noreferrer"
+                               >
+                                 <Download className="w-4 h-4" /> CSV
+                               </a>
+                               <a
+                                 href={`/api/history/${session.id}/download?split=true`}
+                                 className="font-medium text-green-600 hover:text-green-800 flex items-center gap-1 whitespace-nowrap"
+                                 target="_blank"
+                                 rel="noopener noreferrer"
+                               >
+                                 <Download className="w-4 h-4" /> Aufgeteilt
+                               </a>
+                             </div>
                            </td>
                          </tr>
                        ))}
