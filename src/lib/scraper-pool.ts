@@ -17,7 +17,7 @@ import { logger } from '@/lib/logger';
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import os from 'os';
 
-const BROWSER_ROTATE_EVERY = 20; // searches before full browser restart
+const BROWSER_ROTATE_EVERY = 2; // searches before full browser restart
 
 // ─── Stealth init script ──────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ export class ScraperWorker {
 
   async launch() {
     this.browser = await chromium.launch({
-      headless: true,
+      headless: false, // false for demo
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -59,7 +59,7 @@ export class ScraperWorker {
         '--disable-infobars',
         '--window-position=0,0',
         '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-features=IsolateOrigins,site-per-process,BackForwardCache',
         '--disable-site-isolation-trials',
         '--disable-web-security',
       ],
@@ -94,12 +94,12 @@ export class ScraperWorker {
     this.browser = null;
     this.searchCount = 0;
     this.browser = await chromium.launch({
-      headless: true,
+      headless: false, // false for demo
       args: [
         '--no-sandbox', '--disable-setuid-sandbox',
         '--disable-accelerated-2d-canvas', '--disable-infobars',
         '--window-position=0,0', '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-features=IsolateOrigins,site-per-process,BackForwardCache',
         '--disable-site-isolation-trials', '--disable-web-security',
       ],
     });

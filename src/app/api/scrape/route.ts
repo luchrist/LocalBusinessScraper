@@ -205,38 +205,43 @@ export async function POST(request: NextRequest) {
         args: [
           '--disable-blink-features=AutomationControlled',
           '--no-sandbox',
-          '--disable-dev-shm-usage'
+          '--disable-dev-shm-usage',
+          '--disable-features=BackForwardCache',
+          '--disable-extensions'
         ]
       });
-      const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-        locale: 'de-DE',
-        timezoneId: 'Europe/Berlin',
-      });
 
-      // OPTIMIZATION: Block images, fonts, css and analytics to save resources
-      await context.route('**/*', (route) => {
-        const type = route.request().resourceType();
-        const url = route.request().url();
-        
-        // Block heavy resources
-        if (['image', 'font', 'stylesheet', 'media'].includes(type)) {
-          return route.abort();
-        }
-        
-        // Block common trackers
-        if (
-          url.includes('google-analytics') || 
-          url.includes('googletagmanager') || 
-          url.includes('facebook.com') || 
-          url.includes('doubleclick')
-        ) {
-          return route.abort();
-        }
+      // OPTIMIZATION: Context recreation function to prevent Memory/BFCache bloat
+      const createEnrichmentContext = async () => {
+        const ctx = await browser.newContext({
+          userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          viewport: { width: 1920, height: 1080 },
+          locale: 'de-DE',
+          timezoneId: 'Europe/Berlin',
+        });
 
-        return route.continue();
-      });
+        // OPTIMIZATION: Block images, fonts, css and analytics to save resources
+        await ctx.route('**/*', (route) => {
+          const type = route.request().resourceType();
+          const url = route.request().url();
+          
+          if (['image', 'font', 'stylesheet', 'media'].includes(type)) {
+            return route.abort();
+          }
+          
+          if (
+            url.includes('google-analytics') || 
+            url.includes('googletagmanager') || 
+            url.includes('facebook.com') || 
+            url.includes('doubleclick')
+          ) {
+            return route.abort();
+          }
+
+          return route.continue();
+        });
+        return ctx;
+      };
 
       logger.log('🌐 Browser launched');
 
@@ -366,15 +371,20 @@ export async function POST(request: NextRequest) {
                 current: processedBusinesses, total: totalBusinessesFound, searchCount, totalSearches,
               });
               status = 'searching';
-              const contactInfo = await findContactInfo(context, place.website, (msg) => logger.log(msg), {
-                searchEmail, searchOwner, country, businessName: place.name, industry: branche,
-              });
-              if (searchEmail) email = contactInfo.email;
-              if (searchOwner) {
-                owner = contactInfo.owner;
-                ownerSalutations = contactInfo.ownerSalutations;
-                ownerFirstNames = contactInfo.ownerFirstNames;
-                ownerLastNames = contactInfo.ownerLastNames;
+              const siteContext = await createEnrichmentContext();
+              try {
+                const contactInfo = await findContactInfo(siteContext, place.website, (msg) => logger.log(msg), {
+                  searchEmail, searchOwner, country, businessName: place.name, industry: branche,
+                });
+                if (searchEmail) email = contactInfo.email;
+                if (searchOwner) {
+                  owner = contactInfo.owner;
+                  ownerSalutations = contactInfo.ownerSalutations;
+                  ownerFirstNames = contactInfo.ownerFirstNames;
+                  ownerLastNames = contactInfo.ownerLastNames;
+                }
+              } finally {
+                await siteContext.close().catch(() => {});
               }
               status = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
               if (email)  logger.log(`✉️  Email found: ${email}`);
@@ -525,8 +535,9 @@ export async function POST(request: NextRequest) {
                 let enrichStatus = 'no_website';
 
                 if (place.website && (searchEmail || searchOwner)) {
+                  const siteContext = await createEnrichmentContext();
                   try {
-                    const info = await findContactInfo(context, place.website, (msg) => logger.log(msg), {
+                    const info = await findContactInfo(siteContext, place.website, (msg) => logger.log(msg), {
                       searchEmail, searchOwner, country, businessName: place.name, industry: branche,
                     });
                     email = info.email;
@@ -537,6 +548,8 @@ export async function POST(request: NextRequest) {
                   } catch (err) {
                     logger.error(`[Enrich] Error ${place.website}:`, err);
                     enrichStatus = 'error';
+                  } finally {
+                    await siteContext.close().catch(() => {});
                   }
                 } else if (!place.website) {
                   enrichStatus = 'no_website';
@@ -624,7 +637,6 @@ export async function POST(request: NextRequest) {
       updateSessionTotalJobs(db, sessionId, processedBusinesses);
       closeDb(sessionId);
 
-      await context.close();
       await browser.close();
       logger.log(`🎉 Scraping completed successfully. Total results: ${processedBusinesses}`);
 

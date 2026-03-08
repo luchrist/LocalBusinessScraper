@@ -314,8 +314,9 @@ export class GoogleMapsScraper {
             const cards = await this.page.$$('div[role="article"]');
             let processedOne = false;
 
-            for (const card of cards) {
-                if (signal?.aborted) return;
+            try {
+                for (const card of cards) {
+                    if (signal?.aborted) return;
                 try {
                     const label = await card.getAttribute('aria-label');
                     if (!label || seen.has(label)) continue;
@@ -381,6 +382,12 @@ export class GoogleMapsScraper {
                 } catch (e) {
                     if (e instanceof BlockDetectionError) throw e; // propagate immediately
                     logger.error('[Maps] Error processing card:', e);
+                }
+            }
+            } finally {
+                // Free the handles so Playwright V8 engine does not accumulate them
+                for (const card of cards) {
+                    await card.dispose().catch(() => null);
                 }
             }
 
