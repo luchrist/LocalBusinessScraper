@@ -164,6 +164,31 @@ export default function BusinessScraper() {
 
   const [autoScroll, setAutoScroll] = useState(true);
   const tableContainerRef = React.useRef<HTMLDivElement>(null);
+  // Tracks whether connection dropped mid-session (sleep/disconnect) vs user-cancelled
+  const [sessionDropped, setSessionDropped] = useState(false);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  // Refs so event listeners always see current values
+  const sessionIdRef = React.useRef<string | null>(null);
+  const processingRef = React.useRef(false);
+  const userCancelledRef = React.useRef(false);
+
+  React.useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+  React.useEffect(() => { processingRef.current = processing; }, [processing]);
+
+  // Cancel on actual page unload (tab close, navigation, Electron window close).
+  // Does NOT fire on sleep/minimize – enrichment keeps running in that case.
+  React.useEffect(() => {
+    const handlePageHide = (e: PageTransitionEvent) => {
+      if (!e.persisted && processingRef.current && sessionIdRef.current) {
+        navigator.sendBeacon(
+          '/api/scrape/cancel',
+          JSON.stringify({ sessionId: sessionIdRef.current }),
+        );
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
+  }, []);
 
   React.useEffect(() => {
     if (autoScroll && tableContainerRef.current) {
@@ -245,6 +270,8 @@ export default function BusinessScraper() {
     setResults(null);
     setSessionId(null);
     setBlockedInfo(null);
+    setSessionDropped(false);
+    userCancelledRef.current = false;
     setProgress({ current: 0, total: 0, status: 'Starte...', searchCount: 0, totalSearches: 0 });
 
     const controller = new AbortController();
@@ -264,6 +291,7 @@ export default function BusinessScraper() {
     formData.append('enrichmentWorkerCount', String(enrichmentWorkerCount));
 
     const tempResults: BusinessResult[] = [];
+    let receivedComplete = false;
 
     try {
       const response = await fetch('/api/scrape', {
@@ -309,6 +337,7 @@ export default function BusinessScraper() {
                 tempResults.push(data.result);
                 setResults([...tempResults]);
               } else if (data.type === 'complete') {
+                receivedComplete = true;
                 // Results already accumulated via individual 'result' events – no need to re-send the full array
                 setResults([...tempResults]);
                 setProgress({
@@ -335,9 +364,12 @@ export default function BusinessScraper() {
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        console.log('Scraping aborted by user');
-         // Keep results as they are and ensure they are set in state
-         setResults([...tempResults]);
+        if (!userCancelledRef.current && !receivedComplete) {
+          // Connection dropped (sleep/disconnect) but user didn't press cancel.
+          // Enrichment keeps running on the server – show reconnect hint.
+          setSessionDropped(true);
+        }
+        setResults([...tempResults]);
       } else {
         setError(err instanceof Error ? err.message : t.errorOccurred);
       }
@@ -347,10 +379,40 @@ export default function BusinessScraper() {
     }
   };
 
+  const loadSnapshot = async () => {
+    if (!sessionId || snapshotLoading) return;
+    setSnapshotLoading(true);
+    try {
+      const res = await fetch(`/api/scrape/snapshot?session=${sessionId}`);
+      if (!res.ok) { setError('Snapshot konnte nicht geladen werden.'); return; }
+      const data = await res.json();
+      setResults(data.results);
+      if (!data.stillRunning) {
+        setSessionDropped(false);
+        setProgress(p => ({ ...p, status: language === 'de' ? '✅ Enrichment abgeschlossen' : '✅ Enrichment complete', current: data.results.length, total: data.results.length }));
+      } else {
+        setProgress(p => ({ ...p, status: language === 'de' ? `⏳ Noch ${data.results.filter((r: any) => r.status === 'pending' || r.status === 'enriching').length} ausstehend…` : `⏳ Still enriching…`, current: data.results.filter((r: any) => r.status !== 'pending' && r.status !== 'enriching').length, total: data.results.length }));
+      }
+    } catch {
+      setError('Snapshot konnte nicht geladen werden.');
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
+
   const cancelScraping = () => {
+    userCancelledRef.current = true;
+    // Tell the server to mark the session as cancelled in the DB (stops enrichment workers).
+    if (sessionId) {
+      fetch('/api/scrape/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      }).catch(() => {});
+    }
+    // Abort the SSE stream so the client stops receiving events.
     if (abortController) {
       abortController.abort();
-      // Results already in state, final update in catch block
     }
   };
 
@@ -803,6 +865,44 @@ export default function BusinessScraper() {
                   <span className="text-indigo-400">(bei Abbruch damit fortsetzen)</span>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Connection-dropped banner (sleep / network disconnect) */}
+          {sessionDropped && (
+            <div className="mt-4 p-4 rounded-lg border bg-blue-50 border-blue-300 flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-blue-500 mt-0.5 flex-shrink-0" />
+              <div className="flex-1">
+                <p className="font-semibold text-blue-900">
+                  {language === 'de' ? '📡 Verbindung unterbrochen' : '📡 Connection lost'}
+                </p>
+                <p className="text-sm text-blue-800 mt-1">
+                  {language === 'de'
+                    ? 'Das Enrichment läuft im Hintergrund weiter. Klicke auf „Aktualisieren" um den aktuellen Stand zu laden.'
+                    : 'Enrichment continues in the background. Click "Reload" to fetch the current state.'}
+                </p>
+                {sessionId && (
+                  <p className="text-xs text-blue-600 mt-1 font-mono">Session: {sessionId}</p>
+                )}
+                <div className="mt-2 flex gap-3 items-center flex-wrap">
+                  <button
+                    onClick={loadSnapshot}
+                    disabled={snapshotLoading}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {snapshotLoading
+                      ? <Loader className="h-3.5 w-3.5 animate-spin" />
+                      : <span>🔄</span>}
+                    {language === 'de' ? 'Aktualisieren' : 'Reload'}
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('history')}
+                    className="text-sm text-blue-700 underline hover:text-blue-900"
+                  >
+                    {language === 'de' ? 'Verlauf öffnen →' : 'Open History →'}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

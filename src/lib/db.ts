@@ -21,7 +21,7 @@ import crypto from 'crypto';
 
 export type JobStatus    = 'pending' | 'running' | 'done' | 'error';
 export type EnrichStatus = 'pending' | 'enriching' | 'done' | 'error' | 'skipped' | 'no_website';
-export type SessionStatus = 'active' | 'paused' | 'done';
+export type SessionStatus = 'active' | 'paused' | 'done' | 'cancelled';
 
 export interface SessionRow {
   id: string;
@@ -216,6 +216,15 @@ export function createSession(
 
 export function updateSessionStatus(db: Database.Database, sessionId: string, status: SessionStatus) {
   db.prepare(`UPDATE sessions SET status = ? WHERE id = ?`).run(status, sessionId);
+}
+
+export function cancelSession(db: Database.Database, sessionId: string) {
+  db.prepare(`UPDATE sessions SET status = 'cancelled' WHERE id = ?`).run(sessionId);
+}
+
+export function isSessionCancelled(db: Database.Database, sessionId: string): boolean {
+  const row = db.prepare(`SELECT status FROM sessions WHERE id = ?`).get(sessionId) as { status: string } | undefined;
+  return row?.status === 'cancelled';
 }
 
 export function updateSessionTotalJobs(db: Database.Database, sessionId: string, total: number) {

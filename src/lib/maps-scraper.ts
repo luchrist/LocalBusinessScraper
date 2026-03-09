@@ -367,7 +367,7 @@ export class GoogleMapsScraper {
                                 const expected = expectedLabel.toLowerCase();
                                 return text.includes(expected) || expected.includes(text);
                             });
-                        }, label, { timeout: 5000 });
+                        }, label, { timeout: 8000 });
                         consecutiveTimeouts = 0; // panel loaded → reset counter
                         logger.log(`[Maps] [${label}] Detail panel loaded successfully`);
                     } catch {
@@ -375,7 +375,7 @@ export class GoogleMapsScraper {
                         const h1Info = await this.page.$$eval('h1', els => els.map(e => e.textContent?.trim() || ''));
                         consecutiveTimeouts++;
                         logger.warn(`[Maps] [${label}] Panel timeout #${consecutiveTimeouts} for "${label}". Found H1s: ${JSON.stringify(h1Info)}`);
-                        if (consecutiveTimeouts >= 2) {
+                        if (consecutiveTimeouts >= 3) {
                             throw new BlockDetectionError(2,
                                 `Soft block: detail panel failed to load ${consecutiveTimeouts}× in a row`);
                         }
@@ -397,8 +397,8 @@ export class GoogleMapsScraper {
                         logger.log(`[Maps] [${label}] Timeout waiting for address indicator (normal for service areas)`);
                     }
 
-                    // A slightly longer delay to ensure everything settles since enrichment is slower anyway
-                    await this.randomDelay(800, 1500);
+                    // Panel is confirmed loaded by this point – a short settle delay suffices
+                    await this.randomDelay(200, 400);
 
                     const details = await this.extractDetails(label);
                     if (details) {
@@ -495,186 +495,196 @@ export class GoogleMapsScraper {
                 }
             } catch {}
 
-            // Website
-            try {
-                const link = await this.page.$('a[data-item-id="authority"]');
-                if (link) {
-                    const href = await link.getAttribute('href');
-                    if (href) {
-                        try {
-                            const urlObj = new URL(href);
-                            const { domainToUnicode } = require('node:url');
-                            urlObj.hostname = domainToUnicode(urlObj.hostname);
-                            result.website = urlObj.toString();
-                            logger.log(`[Maps] [${name}] Extracted website: ${result.website}`);
-                        } catch {
-                            result.website = href;
-                            logger.log(`[Maps] [${name}] Extracted website (raw): ${result.website}`);
-                        }
-                    }
-                } else {
-                    logger.log(`[Maps] [${name}] No website found`);
-                }
-            } catch { }
+            // ── Single-pass DOM extraction – all scalar fields in one evaluate() call
+            //    to minimise CDP round-trips (~20+ individual calls → 1).
+            type ExtractedData = {
+                website: string | null;
+                phone: string | null;
+                rating: string | null;
+                reviews: string | null;
+                price: string | null;
+                exactIndustry: string | null;
+                address: string | null;
+                hasHoursButton: boolean;
+            };
 
-            // Phone
-            try {
-                const phoneBtn = await this.page.$('button[data-item-id^="phone"]');
+            const extracted = await this.page.evaluate((): ExtractedData => {
+                const strip = (s: string) =>
+                    s.replace(/[\u200B-\u200D\uFEFF\u202A-\u202E]/g, '');
+
+                // Website
+                const websiteEl = document.querySelector<HTMLAnchorElement>('a[data-item-id="authority"]');
+                const website = websiteEl ? websiteEl.getAttribute('href') : null;
+
+                // Phone
+                let phone: string | null = null;
+                const phoneBtn = document.querySelector('button[data-item-id^="phone"]');
                 if (phoneBtn) {
-                    const label = await phoneBtn.getAttribute('aria-label');
-                    if (label) {
-                        // Google Maps often surrounds text with invisible bidirectional characters (e.g. \u202A).
-                        // That prevents the ^ anchor in Regex from cleanly matching the start of the string.
-                        let cleanLabel = label.replace(/[\u200B-\u200D\uFEFF\u202A-\u202E]/g, '');
-                        result.phone = cleanLabel.replace(/^(Phone|Telefon):\s*/i, '').trim();
-                        logger.log(`[Maps] [${name}] Extracted phone: ${result.phone}`);
-                    }
-                } else {
-                    logger.log(`[Maps] [${name}] No phone number found`);
+                    const lbl = phoneBtn.getAttribute('aria-label');
+                    if (lbl) phone = strip(lbl).replace(/^(Phone|Telefon):\s*/i, '').trim();
                 }
-            } catch { }
 
-            // Rating & Reviews
-            try {
-                // Get the detail panel specifically so we don't accidentally grab data from the background list
-                // To avoid waiting for 30s, we use $$ to get the elements instantly and pick the last one.
-                const mainDivs = await this.page.$$('div[role="main"]');
+                // Main detail panel (last div[role="main"] to avoid the background list)
+                const mainDivs = document.querySelectorAll('div[role="main"]');
                 const panel = mainDivs.length > 0 ? mainDivs[mainDivs.length - 1] : null;
+                let rating: string | null = null;
+                let reviews: string | null = null;
+                let price: string | null = null;
 
                 if (panel) {
-                    const ratingText = await panel.evaluate((node) => {
-                        const el = node.querySelector('.F7nice span[aria-hidden="true"]');
-                        return el ? el.textContent : null;
-                    }).catch(() => null);
+                    const ratingEl = panel.querySelector('.F7nice span[aria-hidden="true"]');
+                    if (ratingEl?.textContent) rating = ratingEl.textContent;
 
-                    if (ratingText) {
-                        result.rating = parseFloat(ratingText.replace(',', '.'));
-                        logger.log(`[Maps] [${name}] Extracted rating: ${result.rating}`);
-                    }
+                    const reviewEl = panel.querySelector(
+                        '.F7nice span[aria-label*="reviews" i], .F7nice span[aria-label*="Rezensionen" i]'
+                    );
+                    if (reviewEl) reviews = reviewEl.getAttribute('aria-label');
 
-                    const reviewLabel = await panel.evaluate((node) => {
-                        const el = node.querySelector('.F7nice span[aria-label*="reviews" i], .F7nice span[aria-label*="Rezensionen" i]');
-                        return el ? el.getAttribute('aria-label') : null;
-                    }).catch(() => null);
-
-                    if (reviewLabel) {
-                        const match = reviewLabel.match(/(\d[\d,.]*)/);
-                        if (match) {
-                            result.reviews = parseInt(match[0].replace(/[,.]/g, ''));
-                            logger.log(`[Maps] [${name}] Extracted reviews: ${result.reviews}`);
-                        }
-                    }
-                }
-                
-                if (!result.rating) {
-                    logger.log(`[Maps] [${name}] No rating found`);
-                }
-            } catch { }
-
-            // Price Extractions
-            try {
-                const mainDivs = await this.page.$$('div[role="main"]');
-                const panel = mainDivs.length > 0 ? mainDivs[mainDivs.length - 1] : null;
-                
-                if (panel) {
-                    // First try to find elements with specific price aria-labels within the main panel
-                    const explicitPrice = await panel.evaluate((node) => {
-                        const el = node.querySelector('span[role="img"][aria-label*="Preis" i], span[role="img"][aria-label*="Price" i], span[role="img"][aria-label*="Preiskategorie" i]');
-                        return el ? el.textContent : null;
-                    }).catch(() => null);
-
-                    if (explicitPrice && explicitPrice.includes('€')) {
-                        result.price = explicitPrice.replace(/^[·•\-\s]+/, '').trim();
-                        logger.log(`[Maps] [${name}] Extracted price (aria): "${result.price}"`);
+                    // Price – explicit aria-label first, then span scan
+                    const priceEl = panel.querySelector(
+                        'span[role="img"][aria-label*="Preis" i], span[role="img"][aria-label*="Price" i], span[role="img"][aria-label*="Preiskategorie" i]'
+                    );
+                    if (priceEl?.textContent?.includes('€')) {
+                        price = priceEl.textContent.replace(/^[·•\-\s]+/, '').trim();
                     } else {
-                        // Fallback to searching spans within the place detail panel
-                        // This explicitly ignores the sidebar search results!
-                        const spans = await panel.evaluate((node) => {
-                            return Array.from(node.querySelectorAll('span')).map(e => e.textContent || '');
-                        }).catch(() => [] as string[]);
-                        for (const text of spans) {
-                            let cleanText = text.replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
-                            // Clean up leading dots or whitespace (e.g. "· 10-20 €" or "· €€")
-                            cleanText = cleanText.replace(/^[·•\-\s]+/, '').trim();
-                            if (cleanText.includes('€')) {
-                                // If it's a relatively short text snippet containing at least one digit or multiple € signs
-                                if (cleanText.length < 40 && (/\d/.test(cleanText) || /€{2,}/.test(cleanText))) {
-                                    result.price = cleanText;
-                                    logger.log(`[Maps] [${name}] Extracted price: "${result.price}"`);
-                                    break;
-                                }
+                        for (const span of Array.from(panel.querySelectorAll('span'))) {
+                            const t = (span.textContent ?? '')
+                                .replace(/\s+/g, ' ').replace(/\u00A0/g, ' ')
+                                .replace(/^[·•\-\s]+/, '').trim();
+                            if (t.includes('€') && t.length < 40 && (/\d/.test(t) || /€{2,}/.test(t))) {
+                                price = t;
+                                break;
                             }
                         }
                     }
                 }
-                if (!result.price) {
-                    logger.log(`[Maps] [${name}] No price found`);
+
+                // Exact Industry
+                let exactIndustry: string | null = null;
+                const categoryBtn = document.querySelector('button[jsaction*="category"]');
+                if (categoryBtn?.textContent) exactIndustry = categoryBtn.textContent.trim();
+
+                // Address
+                let address: string | null = null;
+                const addressBtn = document.querySelector('button[data-item-id="address"]');
+                if (addressBtn) {
+                    const lbl = addressBtn.getAttribute('aria-label');
+                    if (lbl) address = strip(lbl).replace(/^(Address|Adresse):\s*/i, '').trim();
                 }
-            } catch (e) {
-                logger.error(`[Maps] [${name}] Error extracting price:`, e);
+
+                // Detect hours button (click handled below in Node.js context)
+                const hasHoursButton = !!(document.querySelector(
+                    'button[aria-label*="open hours" i], span[aria-label*="open hours" i], ' +
+                    'span[aria-label*="Show open hours" i], div[aria-label*="hours" i], ' +
+                    'button[aria-label*="Öffnungszeiten" i], span[aria-label*="Öffnungszeiten" i], ' +
+                    'div[aria-label*="Öffnungszeiten" i], button[data-item-id="openhours"]'
+                ));
+
+                return { website, phone, rating, reviews, price, exactIndustry, address, hasHoursButton };
+            });
+
+            // Apply extracted fields
+            if (extracted.website) {
+                try {
+                    const urlObj = new URL(extracted.website);
+                    const { domainToUnicode } = require('node:url');
+                    urlObj.hostname = domainToUnicode(urlObj.hostname);
+                    result.website = urlObj.toString();
+                    logger.log(`[Maps] [${name}] Extracted website: ${result.website}`);
+                } catch {
+                    result.website = extracted.website;
+                    logger.log(`[Maps] [${name}] Extracted website (raw): ${result.website}`);
+                }
+            } else {
+                logger.log(`[Maps] [${name}] No website found`);
             }
 
-            // Exact Industry
-            try {
-                const categoryBtn = await this.page.$('button[jsaction*="category"]');
-                if (categoryBtn) {
-                    const text = await categoryBtn.textContent();
-                    if (text) {
-                        result.exactIndustry = text.trim();
-                        logger.log(`[Maps] [${name}] Extracted industry: ${result.exactIndustry}`);
-                    }
-                } else {
-                    logger.log(`[Maps] [${name}] No exact industry found`);
+            if (extracted.phone) {
+                result.phone = extracted.phone;
+                logger.log(`[Maps] [${name}] Extracted phone: ${result.phone}`);
+            } else {
+                logger.log(`[Maps] [${name}] No phone number found`);
+            }
+
+            if (extracted.rating) {
+                result.rating = parseFloat(extracted.rating.replace(',', '.'));
+                logger.log(`[Maps] [${name}] Extracted rating: ${result.rating}`);
+            } else {
+                logger.log(`[Maps] [${name}] No rating found`);
+            }
+
+            if (extracted.reviews) {
+                const match = extracted.reviews.match(/(\d[\d,.]*)/);
+                if (match) {
+                    result.reviews = parseInt(match[0].replace(/[,.]/g, ''));
+                    logger.log(`[Maps] [${name}] Extracted reviews: ${result.reviews}`);
                 }
-            } catch { }
+            }
 
-            // Hours
+            if (extracted.price) {
+                result.price = extracted.price;
+                logger.log(`[Maps] [${name}] Extracted price: "${result.price}"`);
+            } else {
+                logger.log(`[Maps] [${name}] No price found`);
+            }
+
+            if (extracted.exactIndustry) {
+                result.exactIndustry = extracted.exactIndustry;
+                logger.log(`[Maps] [${name}] Extracted industry: ${result.exactIndustry}`);
+            } else {
+                logger.log(`[Maps] [${name}] No exact industry found`);
+            }
+
+            if (extracted.address) {
+                result.address = extracted.address;
+                logger.log(`[Maps] [${name}] Extracted address: ${result.address}`);
+            } else {
+                logger.log(`[Maps] [${name}] No address found`);
+            }
+
+            // Hours – requires a click, handled with individual Playwright calls
             try {
-                // Try to expand hours first, handle both English and German labels
-                const expandBtn = await this.page.$('button[aria-label*="open hours" i], span[aria-label*="open hours" i], span[aria-label*="Show open hours" i], div[aria-label*="hours" i], button[aria-label*="Öffnungszeiten" i], span[aria-label*="Öffnungszeiten" i], div[aria-label*="Öffnungszeiten" i], button[data-item-id="openhours"]');
-                if (expandBtn) {
-                    await expandBtn.click();
-                    await this.randomDelay(400, 800);
+                if (extracted.hasHoursButton) {
+                    const expandBtn = await this.page.$(
+                        'button[aria-label*="open hours" i], span[aria-label*="open hours" i], ' +
+                        'span[aria-label*="Show open hours" i], div[aria-label*="hours" i], ' +
+                        'button[aria-label*="Öffnungszeiten" i], span[aria-label*="Öffnungszeiten" i], ' +
+                        'div[aria-label*="Öffnungszeiten" i], button[data-item-id="openhours"]'
+                    );
+                    if (expandBtn) {
+                        await expandBtn.click();
+                        await this.randomDelay(300, 600);
 
-                    // Parse hours table - making selectors more robust in case class names changed
-                    const rows = await this.page.$$('table tr');
-                    if (rows.length > 0) {
-                        const hoursList: string[] = [];
-                        for (const row of rows) {
-                            try {
-                                const tds = await row.$$('td');
+                        // Parse hours table in a single evaluate() pass
+                        const hours = await this.page.evaluate((): string | null => {
+                            const rows = Array.from(document.querySelectorAll('table tr'));
+                            const hoursList: string[] = [];
+                            for (const row of rows) {
+                                const tds = row.querySelectorAll('td');
                                 if (tds.length >= 2) {
-                                    const day = await tds[0].textContent();
-                                    const time = (await tds[1].getAttribute('aria-label')) || (await tds[1].textContent());
-                                    
-                                    if (day && time && day.trim() && time.trim()) {
-                                        hoursList.push(`${day.trim()}: ${time.trim()}`);
-                                    }
+                                    const day = tds[0].textContent?.trim();
+                                    const time = tds[1].getAttribute('aria-label') || tds[1].textContent?.trim();
+                                    if (day && time) hoursList.push(`${day}: ${time}`);
                                 }
-                            } catch { }
-                        }
-                        if (hoursList.length > 0) {
-                            result.hours = hoursList.join(' | ');
-                            logger.log(`[Maps] [${name}] Extracted hours (table): ${result.hours}`);
-                        }
-                    }
-                    
-                    if (!result.hours) {
-                        // generic table fallback
-                        const hoursTable = await this.page.$('table');
-                        if (hoursTable) {
-                            const hoursText = await hoursTable.innerText();
-                            if (hoursText && hoursText.length > 10) {
-                                result.hours = hoursText.replace(/\n/g, ', ');
-                                logger.log(`[Maps] [${name}] Extracted hours (presentation table): ${result.hours}`);
                             }
+                            if (hoursList.length > 0) return hoursList.join(' | ');
+                            const table = document.querySelector('table');
+                            return table ? (table as HTMLElement).innerText.replace(/\n/g, ', ') : null;
+                        });
+
+                        if (hours) {
+                            result.hours = hours;
+                            logger.log(`[Maps] [${name}] Extracted hours: ${result.hours}`);
                         }
                     }
                 }
 
                 // Fallback to button/element label
                 if (!result.hours) {
-                    const hoursBtn = await this.page.$('button[data-item-id="openhours"], div[data-item-id="openhours"], button[aria-label*="Öffnungszeiten" i], button[aria-label*="hours" i]');
+                    const hoursBtn = await this.page.$(
+                        'button[data-item-id="openhours"], div[data-item-id="openhours"], ' +
+                        'button[aria-label*="Öffnungszeiten" i], button[aria-label*="hours" i]'
+                    );
                     if (hoursBtn) {
                         const rawHours = (await hoursBtn.getAttribute('aria-label')) || (await hoursBtn.innerText());
                         if (rawHours) {
@@ -683,29 +693,13 @@ export class GoogleMapsScraper {
                         }
                     }
                 }
-                
+
                 if (!result.hours) {
                     logger.log(`[Maps] [${name}] Could not extract hours for ${name}`);
                 }
             } catch (e) {
                 logger.error(`[Maps] [${name}] Error extracting hours:`, e);
             }
-
-            // Address
-            try {
-                const addressBtn = await this.page.$('button[data-item-id="address"]');
-                if (addressBtn) {
-                    const label = await addressBtn.getAttribute('aria-label');
-                    if (label) {
-                        // Strip invisible characters to ensure clean replacement and db storage
-                        let cleanLabel = label.replace(/[\u200B-\u200D\uFEFF\u202A-\u202E]/g, '');
-                        result.address = cleanLabel.replace(/^(Address|Adresse):\s*/i, '').trim();
-                        logger.log(`[Maps] [${name}] Extracted address: ${result.address}`);
-                    }
-                } else {
-                    logger.log(`[Maps] [${name}] No address found`);
-                }
-            } catch { }
 
             logger.log(`[Maps] [${name}] Finished details extraction successfully`);
             return result;

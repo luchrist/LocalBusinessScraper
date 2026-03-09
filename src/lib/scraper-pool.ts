@@ -187,7 +187,7 @@ export class ScraperPool {
   }
 
   async close() {
-    logger.log('[Pool] Closing all workers…');
+    logger.log('[Pool] Closing all Maps browser workers…');
     await Promise.all(this.workers.map(w => w.close()));
     this.workers = [];
   }

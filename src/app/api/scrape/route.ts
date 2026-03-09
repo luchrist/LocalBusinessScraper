@@ -9,7 +9,7 @@ import { GoogleMapsScraper, BlockDetectionError } from '@/lib/maps-scraper';
 import { ScraperPool } from '@/lib/scraper-pool';
 import { getNextAvailableKey, incrementApiKeyUsage, initSettingsDb } from '@/lib/settings-db';
 import {
-  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, drainStreamable,
+  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, drainStreamable, isSessionCancelled,
   type EnrichStatus,
 } from '@/lib/db';
 
@@ -86,19 +86,20 @@ export async function POST(request: NextRequest) {
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
   
-  // Abort check
-  let isAborted = false;
+  // Tracks only SSE connection state – does NOT stop enrichment.
+  // Enrichment uses the DB cancelled flag instead (see isSessionCancelled).
+  let clientDisconnected = false;
   request.signal.addEventListener('abort', () => {
-      logger.log('⚠️ Client aborted request');
-      isAborted = true;
+      logger.log('⚠️ Client disconnected (sleep / tab close / explicit cancel)');
+      clientDisconnected = true;
   });
 
   const sendProgress = async (data: any) => {
-    if (isAborted) return;
+    if (clientDisconnected) return;
     try {
         await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
     } catch {
-        isAborted = true;
+        clientDisconnected = true;
     }
   };
 
@@ -308,7 +309,13 @@ export async function POST(request: NextRequest) {
       let mapsFinished = false;
 
       async function runEnrichmentPoller() {
-        while (!isAborted) {
+        // Runs until natural DB completion or explicit session cancel.
+        // Client disconnect (sleep / tab close) does NOT stop this loop.
+        while (true) {
+          if (isSessionCancelled(db, sessionId)) {
+            logger.log('[Enrichment] Session cancelled – stopping worker.');
+            break;
+          }
           const placeR = claimNextPlace(db, sessionId);
           if (!placeR) {
              const missedRows = drainStreamable(db, sessionId);
@@ -425,7 +432,7 @@ export async function POST(request: NextRequest) {
         const isApi = effectiveMax <= 60;
 
         const task = async () => {
-          if (isAborted) return;
+          if (isSessionCancelled(db, sessionId)) return;
 
           searchCount++;
           const mode = isApi ? 'API' : 'Scraping';
@@ -489,7 +496,7 @@ export async function POST(request: NextRequest) {
 
           let rowProcessedCount = 0;
           for (const place of uniquePlaces) {
-            if (isAborted) break;
+            if (isSessionCancelled(db, sessionId)) break;
             if (rowProcessedCount >= effectiveMax) break;
             rowProcessedCount++;
 
@@ -534,7 +541,7 @@ export async function POST(request: NextRequest) {
 
             let scraped = 0;
             for await (const place of scraper.scrape(request.signal)) {
-              if (isAborted) break;
+              if (isSessionCancelled(db, sessionId)) break;
               if (effectiveMax !== Infinity && scraped >= effectiveMax) break;
 
               // Kombiniere Name UND Adresse strikt als Fallback, falls Google keine saubere ID liefert
@@ -600,7 +607,11 @@ export async function POST(request: NextRequest) {
               logger.error(`[Scraping] Error for "${branche}" in "${stadt}":`, e);
             }
           } finally {
-            try { await worker.resetContext(); } catch {}
+            // Skip resetContext on the last task – pool.close() will clean up immediately after,
+            // so launching a fresh browser/context just to discard it is wasteful.
+            if (rowIdx !== lastScrapingRowIdx) {
+              try { await worker.resetContext(); } catch {}
+            }
             pool.release(worker);
           }
           // Close the Maps browser immediately once the last scraping task is done
