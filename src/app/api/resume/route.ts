@@ -55,10 +55,19 @@ export async function GET(request: NextRequest) {
       resetStaleJobs(db, sessionId);
       updateSessionStatus(db, sessionId, 'active');
 
-      const { worker_count, search_email, search_owner, country } = session;
+      const { 
+        worker_count, search_email, search_owner, country,
+        min_price, max_price, category_whitelist, category_blacklist
+      } = session;
       const searchEmail = !!search_email;
       const searchOwner = !!search_owner;
       const totalJobs   = session.total_jobs;
+      
+      const sessionMinPrice = min_price ?? undefined;
+      const sessionMaxPrice = max_price ?? undefined;
+      
+      const sessionWhitelist = category_whitelist ? category_whitelist.split(',').map(s => s.trim()).filter(Boolean) : [];
+      const sessionBlacklist = category_blacklist ? category_blacklist.split(',').map(s => s.trim()).filter(Boolean) : [];
 
       await send({ type: 'session', sessionId, resumed: true });
       logger.log(`[Resume] Session ${sessionId} – ${totalJobs} total jobs, resuming`);
@@ -103,7 +112,13 @@ export async function GET(request: NextRequest) {
               totalSearches: totalJobs,
             });
 
-            const scraper = new GoogleMapsScraper(worker.page!);
+            const scraper = new GoogleMapsScraper(
+              worker.page!,
+              sessionMinPrice,
+              sessionMaxPrice,
+              sessionWhitelist,
+              sessionBlacklist
+            );
             await scraper.search(stadt, branche);
 
             for await (const place of scraper.scrape(request.signal)) {
@@ -151,6 +166,7 @@ export async function GET(request: NextRequest) {
           const branche = (db.prepare('SELECT branche FROM jobs WHERE id = ?').get(place.job_id) as any)?.branche ?? '';
           let email: string | null = null;
           let owner: string | null = null;
+          let ownerSalutations: string | null = null;
           let ownerFirstNames: string | null = null;
           let ownerLastNames: string | null = null;
           let enrichStatus: EnrichStatus = 'skipped';
@@ -162,6 +178,7 @@ export async function GET(request: NextRequest) {
               });
               email = info.email;
               owner = info.owner;
+              ownerSalutations = info.ownerSalutations;
               ownerFirstNames = info.ownerFirstNames;
               ownerLastNames = info.ownerLastNames;
               enrichStatus = 'done';
@@ -172,6 +189,7 @@ export async function GET(request: NextRequest) {
           updatePlaceEnriched(db, place.id, {
             email,
             owner,
+            ownerSalutations,
             ownerFirstNames,
             ownerLastNames,
             status: enrichStatus,

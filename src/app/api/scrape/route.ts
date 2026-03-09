@@ -9,7 +9,7 @@ import { GoogleMapsScraper, BlockDetectionError } from '@/lib/maps-scraper';
 import { ScraperPool } from '@/lib/scraper-pool';
 import { getNextAvailableKey, incrementApiKeyUsage, initSettingsDb } from '@/lib/settings-db';
 import {
-  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs,
+  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, drainStreamable,
   type EnrichStatus,
 } from '@/lib/db';
 
@@ -120,6 +120,24 @@ export async function POST(request: NextRequest) {
       const maxPriceStr = formData.get('maxPrice') as string;
       const maxPrice = maxPriceStr ? parseInt(maxPriceStr) : undefined;
 
+      const categoryWhitelistStr = formData.get('categoryWhitelist') as string || '';
+      const categoryWhitelist = categoryWhitelistStr.split(',').map(s => s.trim()).filter(Boolean);
+
+      const categoryBlacklistStr = formData.get('categoryBlacklist') as string || '';
+      const categoryBlacklist = categoryBlacklistStr.split(',').map(s => s.trim()).filter(Boolean);
+
+      const checkCategory = (exactIndustry?: string): boolean => {
+        if (!exactIndustry) return true;
+        const industryLower = exactIndustry.toLowerCase();
+        if (categoryWhitelist.length > 0) {
+            return categoryWhitelist.some(term => industryLower.includes(term.toLowerCase()));
+        }
+        if (categoryBlacklist.length > 0) {
+            return !categoryBlacklist.some(term => industryLower.includes(term.toLowerCase()));
+        }
+        return true;
+      };
+
       const parsePriceAndMatch = (priceString?: string): boolean => {
         if (!priceString) return true;
         const rangeMatch = priceString.match(/(\d+)[^\d]+(\d+)/);
@@ -141,8 +159,8 @@ export async function POST(request: NextRequest) {
           }
         }
         if (!bounds) return true;
-        if (minPrice !== undefined && bounds.upperBound < minPrice) return false;
-        if (maxPrice !== undefined && bounds.lowerBound > maxPrice) return false;
+        if (minPrice !== undefined && bounds.lowerBound < minPrice) return false;
+        if (maxPrice !== undefined && bounds.upperBound > maxPrice) return false;
         return true;
       };
 
@@ -194,7 +212,17 @@ export async function POST(request: NextRequest) {
       // SQLite session – scraping results written to disk immediately, never piling up in RAM
       const sessionId = newSessionId();
       const db = openDb(sessionId);
-      createSession(db, { sessionId, workerCount: 1, searchEmail, searchOwner, country });
+      createSession(db, {
+        sessionId,
+        workerCount: 1, 
+        searchEmail, 
+        searchOwner, 
+        country,
+        minPrice, 
+        maxPrice, 
+        categoryWhitelist, 
+        categoryBlacklist 
+      });
       await sendProgress({ type: 'session', sessionId });
 
       const seenPlaceIds = new Set<string>();
@@ -276,6 +304,116 @@ export async function POST(request: NextRequest) {
       }
       let poolClosed = false;
 
+      // ─── BACKGROUND ENRICHMENT POLLER ───
+      let mapsFinished = false;
+
+      async function runEnrichmentPoller() {
+        while (!isAborted) {
+          const placeR = claimNextPlace(db, sessionId);
+          if (!placeR) {
+             const missedRows = drainStreamable(db, sessionId);
+             for (const row of missedRows) {
+               processedBusinesses++;
+               await sendProgress({
+                 type: 'result',
+                 result: {
+                   stadt: row.stadt, branche: row.branche, name: row.name, adresse: row.address ?? undefined,
+                   telefon: row.phone ?? undefined, website: row.website ?? undefined,
+                   email: row.email || undefined, owner: row.owner || undefined,
+                   ownerSalutations: row.owner_salutations || undefined,
+                   ownerFirstNames: row.owner_first_names || undefined,
+                   ownerLastNames: row.owner_last_names || undefined,
+                   status: row.enrich_status as any, hours: row.hours ?? undefined,
+                   price: row.price ?? undefined, rating: row.rating ?? undefined, reviews: row.reviews ?? undefined,
+                 },
+                 current: processedBusinesses, total: totalBusinessesFound,
+               });
+             }
+             if (mapsFinished && !hasPendingPlaces(db, sessionId)) {
+                 break;
+             }
+             await new Promise(r => setTimeout(r, 500));
+             continue;
+          }
+
+          let email: string | null = null;
+          let owner: string | null = null;
+          let ownerSalutations: string | null = null;
+          let ownerFirstNames: string | null = null;
+          let ownerLastNames: string | null = null;
+          let enrichStatus = 'no_website';
+
+          if (placeR.website && (searchEmail || searchOwner)) {
+            const siteContext = await createEnrichmentContext();
+            try {
+              const info = await findContactInfo(siteContext, placeR.website, (msg) => logger.log(msg), {
+                searchEmail, searchOwner, country, businessName: placeR.name, industry: placeR.branche,
+              });
+              email = info.email;
+              owner = info.owner;
+              ownerSalutations = info.ownerSalutations;
+              ownerFirstNames = info.ownerFirstNames;
+              ownerLastNames = info.ownerLastNames;
+              enrichStatus = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
+            } catch (err) {
+              logger.error(`[Enrich] Error ${placeR.website}:`, err);
+              enrichStatus = 'error';
+            } finally {
+              await siteContext.close().catch(() => {});
+            }
+          } else if (!placeR.website) {
+            enrichStatus = 'no_website';
+          } else {
+            enrichStatus = 'skipped';
+          }
+
+          updatePlaceEnriched(db, placeR.id, {
+            email: email || null,
+            owner: owner || null,
+            ownerSalutations: ownerSalutations || null,
+            ownerFirstNames: ownerFirstNames || null,
+            ownerLastNames: ownerLastNames || null,
+            status: enrichStatus as EnrichStatus,
+          });
+
+          const scrapingResult: BusinessResult = {
+            stadt: placeR.stadt, branche: placeR.branche, name: placeR.name, adresse: placeR.address ?? undefined,
+            telefon: placeR.phone ?? undefined, website: placeR.website ?? undefined,
+            email: email || undefined,
+            owner: owner || undefined,
+            ownerSalutations: ownerSalutations || undefined,
+            ownerFirstNames: ownerFirstNames || undefined,
+            ownerLastNames: ownerLastNames || undefined,
+            status: enrichStatus, hours: placeR.hours ?? undefined,
+            price: placeR.price ?? undefined,
+            rating: placeR.rating ?? undefined, reviews: placeR.reviews ?? undefined,
+          };
+          
+          db.prepare(`UPDATE places SET streamed = 1 WHERE id = ?`).run(placeR.id);
+          
+          processedBusinesses++;
+          await sendProgress({
+            type: 'result', result: scrapingResult,
+            current: processedBusinesses, total: totalBusinessesFound,
+          });
+        }
+      }
+
+      const gbRam = os.totalmem() / 1024 ** 3;
+      let enrichmentConcurrency = 1;
+      if (enrichmentWorkerCountRaw > 0) {
+        enrichmentConcurrency = Math.max(1, enrichmentWorkerCountRaw);
+      } else {
+        if (gbRam > 16) enrichmentConcurrency = 4;
+        else if (gbRam > 8) enrichmentConcurrency = 3;
+        else enrichmentConcurrency = 2;
+      }
+      if (singleWorker) enrichmentConcurrency = 1;
+
+      logger.log(`[Enrichment] Starting ${enrichmentConcurrency} background workers.`);
+      const pollerPromises = Array.from({ length: enrichmentConcurrency }).map(() => runEnrichmentPoller());
+      // ────────────────────────────────────────
+
       for (let rowIdx = 0; rowIdx < data.length; rowIdx++) {
         const row = data[rowIdx];
         const stadt = row.stadt!;
@@ -311,8 +449,13 @@ export async function POST(request: NextRequest) {
           const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: jobMax });
 
           const uniquePlaces: Place[] = [];
-          for (const place of places) {              if (!parsePriceAndMatch(place.price)) {
+          for (const place of places) {
+              if (!parsePriceAndMatch(place.price)) {
                 logger.log(`⚠️ Skipping ${place.name} due to price filter (${place.price})`);
+                continue;
+              }
+              if (!checkCategory(place.exactIndustry)) {
+                logger.log(`⚠️ Skipping ${place.name} due to category filter (${place.exactIndustry})`);
                 continue;
               }
             if (seenPlaceIds.has(place.id)) {
@@ -345,14 +488,14 @@ export async function POST(request: NextRequest) {
           });
 
           let rowProcessedCount = 0;
-          const processPlace = async (place: Place) => {
-            if (isAborted) return;
-            if (rowProcessedCount >= effectiveMax) return;
+          for (const place of uniquePlaces) {
+            if (isAborted) break;
+            if (rowProcessedCount >= effectiveMax) break;
             rowProcessedCount++;
 
             // Insert placeholder into DB immediately
             const placeKey = place.id || `${place.name}|${place.address}`;
-            const dbId = insertPlace(db, sessionId, jobId, {
+            insertPlace(db, sessionId, jobId, {
               name: place.name,
               website: place.website,
               phone: place.phone,
@@ -365,115 +508,15 @@ export async function POST(request: NextRequest) {
               exactIndustry: place.exactIndustry,
             });
 
-            let email: string | null = null;
-            let owner: string | null = null;
-            let ownerSalutations: string | null = null;
-            let ownerFirstNames: string | null = null;
-            let ownerLastNames: string | null = null;
-            let status = 'no_website';
-
-            if (place.website && (searchEmail || searchOwner)) {
-              logger.log(`🔗 Checking website for "${place.name}": ${place.website}`);
-              await sendProgress({
-                type: 'progress',
-                message: `Searching for ${searchEmail && searchOwner ? 'email & owner' : searchEmail ? 'email' : 'owner'} on ${place.website}`,
-                current: processedBusinesses, total: totalBusinessesFound, searchCount, totalSearches,
-              });
-              status = 'searching';
-              const siteContext = await createEnrichmentContext();
-              try {
-                const contactInfo = await findContactInfo(siteContext, place.website, (msg) => logger.log(msg), {
-                  searchEmail, searchOwner, country, businessName: place.name, industry: branche,
-                });
-                if (searchEmail) email = contactInfo.email;
-                if (searchOwner) {
-                  owner = contactInfo.owner;
-                  ownerSalutations = contactInfo.ownerSalutations;
-                  ownerFirstNames = contactInfo.ownerFirstNames;
-                  ownerLastNames = contactInfo.ownerLastNames;
-                }
-              } finally {
-                await siteContext.close().catch(() => {});
-              }
-              status = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
-              if (email)  logger.log(`✉️  Email found: ${email}`);
-              if (owner)  logger.log(`👤 Owner found: ${owner}`);
-              if (!email && !owner && (searchEmail || searchOwner)) {
-                logger.log(`❌ No ${searchEmail && searchOwner ? 'email or owner' : searchEmail ? 'email' : 'owner'} found on ${place.website}`);
-              }
-            } else if (!place.website) {
-              logger.log(`⚠️  No website for "${place.name}"`);
-            } else {
-              logger.log(`⏭️  Skipping contact info search for "${place.name}" (disabled)`);
-              status = 'skipped';
-            }
-
-            // Update DB with enrichment result
-            updatePlaceEnriched(db, dbId, {
-              email: email || null,
-              owner: owner || null,
-              ownerSalutations: ownerSalutations || null,
-              ownerFirstNames: ownerFirstNames || null,
-              ownerLastNames: ownerLastNames || null,
-              status: status as EnrichStatus,
-            });
-
-            const apiResult: BusinessResult = {
-              stadt, branche, name: place.name, adresse: place.address,
-              telefon: place.phone, website: place.website,
-              email: email || undefined,
-              owner: owner || undefined,
-              ownerSalutations: ownerSalutations || undefined,
-              ownerFirstNames: ownerFirstNames || undefined,
-              ownerLastNames: ownerLastNames || undefined,
-              status, hours: place.hours, price: place.price, rating: place.rating, reviews: place.reviews,
-            };
-            processedBusinesses++;
+            totalBusinessesFound++;
             await sendProgress({
-              type: 'result',
-              result: apiResult,
+              type: 'progress',
+              message: `[API] Found ${place.name}`,
               current: processedBusinesses,
               total: totalBusinessesFound,
+              searchCount, totalSearches,
             });
-          };
-
-          const domainGroups = new Map<string, Place[]>();
-          const noWebsitePlaces: Place[] = [];
-          for (const place of uniquePlaces) {
-            if (place.website) {
-              try {
-                const domain = new URL(place.website).hostname;
-                if (!domainGroups.has(domain)) domainGroups.set(domain, []);
-                domainGroups.get(domain)!.push(place);
-              } catch { noWebsitePlaces.push(place); }
-            } else {
-              noWebsitePlaces.push(place);
-            }
           }
-          const tasks: (() => Promise<void>)[] = [
-            ...[...domainGroups.values()].map(group => async () => { 
-              for (const p of group) {
-                if (isAborted) break;
-                await processPlace(p); 
-              }
-            }),
-            ...noWebsitePlaces.map(p => async () => {
-              if (isAborted) return;
-              await processPlace(p);
-            }),
-          ];
-          const gbRam = os.totalmem() / 1024 ** 3;
-          let enrichmentConcurrency = 1;
-          if (enrichmentWorkerCountRaw > 0) {
-            enrichmentConcurrency = enrichmentWorkerCountRaw;
-          } else {
-            if (gbRam > 16) enrichmentConcurrency = 3;
-            else if (gbRam > 8) enrichmentConcurrency = 2;
-          }
-
-          if (singleWorker) enrichmentConcurrency = 1;
-
-          await runWithLimit(tasks, enrichmentConcurrency);
         } else if (mapsPaused) {
           // Maps is blocked – skip scraping rows, enrichment for prior results is already done
           logger.log(`[Scraping] Skipping "${branche}" in "${stadt}" – Maps is paused (block detected)`);          if (rowIdx === lastScrapingRowIdx && !poolClosed) {
@@ -486,40 +529,38 @@ export async function POST(request: NextRequest) {
           const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results });
           const worker = await pool.acquire();
           try {
-            const scraper = new GoogleMapsScraper(worker.page!, minPrice, maxPrice);
+            const scraper = new GoogleMapsScraper(worker.page!, minPrice, maxPrice, categoryWhitelist, categoryBlacklist);
             await scraper.search(stadt, branche);
 
             let scraped = 0;
-            const activeTasks = new Set<Promise<void>>();
-            const gbRam = os.totalmem() / 1024 ** 3;
-            let enrichmentConcurrency = 1;
-            if (enrichmentWorkerCountRaw > 0) {
-              enrichmentConcurrency = enrichmentWorkerCountRaw;
-            } else {
-              if (gbRam > 16) enrichmentConcurrency = 3;
-              else if (gbRam > 8) enrichmentConcurrency = 2;
-            }
-            if (singleWorker) enrichmentConcurrency = 1;
-
             for await (const place of scraper.scrape(request.signal)) {
               if (isAborted) break;
               if (effectiveMax !== Infinity && scraped >= effectiveMax) break;
 
-              const placeKey = place.placeKey || `${place.name}|${place.address ?? ''}`;
-              if (seenPlaceIds.has(placeKey)) continue;
+              // Kombiniere Name UND Adresse strikt als Fallback, falls Google keine saubere ID liefert
+              const fallbackKey = `${place.name} --- ${place.address ? place.address : 'Ohne Adresse'}`;
+              const placeKey = place.placeKey ? place.placeKey : fallbackKey;
+
+              if (seenPlaceIds.has(placeKey)) {
+                logger.log(`♻️ [Scraping] Skipping duplicate place ID/Key: ${placeKey} (Name: ${place.name})`);
+                continue;
+              }
               let domain: string | null = null;
               if (place.website) {
                 try { domain = new URL(place.website).hostname.replace(/^www\./, ''); } catch {}
               }
-              if (domain && seenDomains.has(domain)) continue;
+              if (domain && seenDomains.has(domain)) {
+                logger.log(`♻️ [Scraping] Skipping duplicate domain: ${domain} (${place.name})`);
+                continue;
+              }
               seenPlaceIds.add(placeKey);
               if (domain) seenDomains.add(domain);
 
               totalBusinessesFound++;
               await sendProgress({
                 type: 'progress',
-                message: `[Scraping] Checking ${place.name}`,
-                current: processedBusinesses,
+                message: `[Scraping] Found ${place.name}`,
+                current: processedBusinesses, // progress updated by enrichment worker
                 total: totalBusinessesFound,
                 searchCount,
                 totalSearches,
@@ -527,7 +568,7 @@ export async function POST(request: NextRequest) {
 
               // Write to SQLite (disk) immediately so the placeholder exists
               const placeKey2 = place.placeKey || `${place.name}|${place.address ?? ''}`;
-              const dbId = insertPlace(db, sessionId, jobId, {
+              insertPlace(db, sessionId, jobId, {
                 name: place.name, website: place.website ?? undefined,
                 phone: place.phone ?? undefined, rating: place.rating ?? undefined,
                 reviews: place.reviews ?? undefined, hours: place.hours ?? undefined,
@@ -537,78 +578,7 @@ export async function POST(request: NextRequest) {
               });
 
               scraped++;
-
-              const processPlace = async () => {
-                let email: string | null = null;
-                let owner: string | null = null;
-                let ownerSalutations: string | null = null;
-                let ownerFirstNames: string | null = null;
-                let ownerLastNames: string | null = null;
-                let enrichStatus = 'no_website';
-
-                if (place.website && (searchEmail || searchOwner)) {
-                  const siteContext = await createEnrichmentContext();
-                  try {
-                    const info = await findContactInfo(siteContext, place.website, (msg) => logger.log(msg), {
-                      searchEmail, searchOwner, country, businessName: place.name, industry: branche,
-                    });
-                    email = info.email;
-                    owner = info.owner;
-                    ownerFirstNames = info.ownerFirstNames;
-                    ownerLastNames = info.ownerLastNames;
-                    enrichStatus = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
-                  } catch (err) {
-                    logger.error(`[Enrich] Error ${place.website}:`, err);
-                    enrichStatus = 'error';
-                  } finally {
-                    await siteContext.close().catch(() => {});
-                  }
-                } else if (!place.website) {
-                  enrichStatus = 'no_website';
-                } else {
-                  enrichStatus = 'skipped';
-                }
-
-                updatePlaceEnriched(db, dbId, {
-                  email: email || null,
-                  owner: owner || null,
-                  ownerSalutations: ownerSalutations || null,
-                  ownerFirstNames: ownerFirstNames || null,
-                  ownerLastNames: ownerLastNames || null,
-                  status: enrichStatus as EnrichStatus,
-                });
-
-                const scrapingResult: BusinessResult = {
-                  stadt, branche, name: place.name, adresse: place.address ?? undefined,
-                  telefon: place.phone ?? undefined, website: place.website ?? undefined,
-                  email: email || undefined,
-                  owner: owner || undefined,
-                  ownerSalutations: ownerSalutations || undefined,
-                  ownerFirstNames: ownerFirstNames || undefined,
-                  ownerLastNames: ownerLastNames || undefined,
-                  status: enrichStatus, hours: place.hours ?? undefined,
-                  price: (place as any).price ?? undefined,
-                  rating: place.rating ?? undefined, reviews: place.reviews ?? undefined,
-                };
-                
-                processedBusinesses++;
-                await sendProgress({
-                  type: 'result', result: scrapingResult,
-                  current: processedBusinesses, total: totalBusinessesFound,
-                });
-              };
-
-              const taskPromise = processPlace();
-              activeTasks.add(taskPromise);
-              taskPromise.finally(() => activeTasks.delete(taskPromise));
-
-              if (activeTasks.size >= enrichmentConcurrency) {
-                await Promise.race(activeTasks);
-              }
             }
-
-            // Wait for remaining enrichments of this keyword
-            await Promise.all(activeTasks);
           } catch (e) {
             if (e instanceof BlockDetectionError) {
               mapsPaused = true;
@@ -647,6 +617,19 @@ export async function POST(request: NextRequest) {
 
       // Execute sequentially (no parallel API / Scraping)
       await runWithLimit(allTasks, 1);
+      
+      // Let poller know mapping is complete, wait for it to enrich remaining items
+      mapsFinished = true;
+      logger.log('[Enrichment] Waiting for background workers to finish remaining enrichments.');
+      await sendProgress({
+        type: 'progress',
+        message: 'Maps done. Finishing enrichment tasks...',
+        current: processedBusinesses,
+        total: totalBusinessesFound,
+        searchCount: totalSearches,
+        totalSearches,
+      });
+      await Promise.all(pollerPromises);
 
       if (hasScrapingRows && !poolClosed) {
         logger.log('[Pool] All tasks finished. Shutting down Maps worker pool to free RAM.');

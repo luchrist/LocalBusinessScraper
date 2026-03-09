@@ -501,8 +501,8 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
         const url = new URL(value);
         url.hash = '';
 
-        // Root query variants (e.g. ?lang=de) are treated as homepage.
-        if (url.pathname === '/') {
+        // Root query variants (e.g. ?lang=de) are treated as homepage, but ignore WordPress page IDs
+        if (url.pathname === '/' && !url.searchParams.has('page_id')) {
           url.search = '';
         }
 
@@ -525,7 +525,15 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
          
          try {
            logger(`   📲 Loading (Playwright): ${url}`);
-           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+           try {
+             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+           } catch (gotoErr: any) {
+             if (gotoErr.message && gotoErr.message.toLowerCase().includes('timeout')) {
+               logger(`   ⚠️ Timeout waiting for domcontentloaded on ${url}, attempting to extract from partial load...`);
+             } else {
+               throw gotoErr;
+             }
+           }
            assertNotTimedOut();
            
            // Human-like interaction
@@ -665,7 +673,7 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
   const logger = log || console.log;
   const result: ScrapeResult = { email: null, owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
   const retryLimit = 1;
-  const attemptTimeoutMs = 30000;
+  const attemptTimeoutMs = 60000;
 
   logger(`🕷️  Starting scraping for: ${websiteUrl} (email: ${searchEmail}, owner: ${searchOwner}, country: ${country})`);
 

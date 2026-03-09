@@ -152,6 +152,8 @@ export default function BusinessScraper() {
   const [maxBusinesses, setMaxBusinesses] = useState<number | 'max' | ''>(60);
   const [minPrice, setMinPrice] = useState<number | ''>('');
   const [maxPrice, setMaxPrice] = useState<number | ''>('');
+  const [categoryWhitelist, setCategoryWhitelist] = useState('');
+  const [categoryBlacklist, setCategoryBlacklist] = useState('');
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [enrichmentWorkerCount, setEnrichmentWorkerCount] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -257,6 +259,8 @@ export default function BusinessScraper() {
     formData.append('maxBusinesses', String(!maxBusinesses ? 20 : (maxBusinesses === 'max' ? 100000 : maxBusinesses)));
     if (minPrice !== '') formData.append('minPrice', String(minPrice));
     if (maxPrice !== '') formData.append('maxPrice', String(maxPrice));
+    formData.append('categoryWhitelist', categoryWhitelist);
+    formData.append('categoryBlacklist', categoryBlacklist);
     formData.append('enrichmentWorkerCount', String(enrichmentWorkerCount));
 
     const tempResults: BusinessResult[] = [];
@@ -605,7 +609,7 @@ export default function BusinessScraper() {
                   <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
                     <Filter className="w-4 h-4" />
                     <span>Filter</span>
-                    {(minPrice !== '' || maxPrice !== '') && (
+                    {(minPrice !== '' || maxPrice !== '' || categoryWhitelist !== '' || categoryBlacklist !== '') && (
                       <span className="w-2 h-2 rounded-full bg-blue-500 ml-1"></span>
                     )}
                   </div>
@@ -637,6 +641,32 @@ export default function BusinessScraper() {
                         className="w-24 px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
                         placeholder="z.B. 50"
                       />
+                    </div>
+                    <div className="pt-2 border-t border-gray-100">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Kategorien Whitelist (kommagetrennt)
+                      </label>
+                      <textarea
+                        value={categoryWhitelist}
+                        onChange={(e) => setCategoryWhitelist(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="z.B. Webdesign-Agentur, Marketingberater"
+                        rows={2}
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Wenn nicht leer, werden NUR diese Kategorien zugelassen.</p>
+                    </div>
+                    <div className="pt-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Kategorien Blacklist (kommagetrennt)
+                      </label>
+                      <textarea
+                        value={categoryBlacklist}
+                        onChange={(e) => setCategoryBlacklist(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="z.B. Imbiss, Zahnarzt"
+                        rows={2}
+                      />
+                      <p className="mt-1 text-xs text-gray-500">Wenn enthalten, werden diese Kategorien ignoriert (z.B. "imbiss" blockiert auch "Kebabimbiss").</p>
                     </div>
                   </div>
                 )}

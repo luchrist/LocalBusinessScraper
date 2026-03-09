@@ -32,6 +32,10 @@ export interface SessionRow {
   search_email: number;   // 0/1
   search_owner: number;   // 0/1
   country: string;
+  min_price: number | null;
+  max_price: number | null;
+  category_whitelist: string | null;
+  category_blacklist: string | null;
 }
 
 export interface JobRow {
@@ -68,6 +72,11 @@ export interface PlaceRow {
   created_at: number;
 }
 
+export interface ClaimedPlaceRow extends PlaceRow {
+  stadt: string;
+  branche: string;
+}
+
 // ─── DB singleton cache (one DB per session inside this process) ──────────────
 
 const dbCache = new Map<string, Database.Database>();
@@ -98,7 +107,11 @@ export function openDb(sessionId: string): Database.Database {
       worker_count INTEGER NOT NULL DEFAULT 2,
       search_email INTEGER NOT NULL DEFAULT 1,
       search_owner INTEGER NOT NULL DEFAULT 1,
-      country      TEXT NOT NULL DEFAULT 'de'
+      country      TEXT NOT NULL DEFAULT 'de',
+      min_price    INTEGER,
+      max_price    INTEGER,
+      category_whitelist TEXT,
+      category_blacklist TEXT
     );
 
     CREATE TABLE IF NOT EXISTS jobs (
@@ -143,6 +156,10 @@ export function openDb(sessionId: string): Database.Database {
   // Migration: add max_results column to existing DBs
   try { db.exec(`ALTER TABLE jobs ADD COLUMN max_results INTEGER`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN price TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE sessions ADD COLUMN min_price INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE sessions ADD COLUMN max_price INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE sessions ADD COLUMN category_whitelist TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE sessions ADD COLUMN category_blacklist TEXT`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_first_names TEXT`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_last_names TEXT`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN owner_salutations TEXT`); } catch {}
@@ -165,12 +182,36 @@ export function newSessionId(): string {
 
 export function createSession(
   db: Database.Database,
-  opts: { sessionId: string; workerCount: number; searchEmail: boolean; searchOwner: boolean; country: string }
+  opts: {
+    sessionId: string;
+    workerCount: number;
+    searchEmail: boolean;
+    searchOwner: boolean;
+    country: string;
+    minPrice?: number;
+    maxPrice?: number;
+    categoryWhitelist?: string[];
+    categoryBlacklist?: string[];
+  }
 ): void {
   db.prepare(`
-    INSERT INTO sessions (id, created_at, status, worker_count, search_email, search_owner, country)
-    VALUES (?, ?, 'active', ?, ?, ?, ?)
-  `).run(opts.sessionId, Date.now(), opts.workerCount, opts.searchEmail ? 1 : 0, opts.searchOwner ? 1 : 0, opts.country);
+    INSERT INTO sessions (
+      id, created_at, status, worker_count, search_email, search_owner, country,
+      min_price, max_price, category_whitelist, category_blacklist
+    )
+    VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    opts.sessionId,
+    Date.now(),
+    opts.workerCount,
+    opts.searchEmail ? 1 : 0,
+    opts.searchOwner ? 1 : 0,
+    opts.country,
+    opts.minPrice ?? null,
+    opts.maxPrice ?? null,
+    opts.categoryWhitelist?.join(',') || null,
+    opts.categoryBlacklist?.join(',') || null
+  );
 }
 
 export function updateSessionStatus(db: Database.Database, sessionId: string, status: SessionStatus) {
@@ -262,6 +303,24 @@ export function countJobs(db: Database.Database, sessionId: string): { pending: 
 
 // ─── Place helpers ────────────────────────────────────────────────────────────
 
+const SOCIAL_MEDIA_DOMAINS = [
+  'facebook.com', 'fb.com', 'instagram.com', 'linkedin.com',
+  'twitter.com', 'x.com', 'tiktok.com', 'pinterest.com',
+  'youtube.com', 'snapchat.com', 'wa.me', 'linktr.ee', 'xing.com', 'reddit.com'
+];
+
+export function isSocialMediaUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  try {
+    const lowerUrl = url.toLowerCase();
+    const urlObj = new URL(lowerUrl.startsWith('http') ? lowerUrl : `https://${lowerUrl}`);
+    const hostname = urlObj.hostname;
+    return SOCIAL_MEDIA_DOMAINS.some(d => hostname === d || hostname.endsWith(`.${d}`));
+  } catch {
+    return false;
+  }
+}
+
 export function insertPlace(
   db: Database.Database,
   sessionId: string,
@@ -279,15 +338,17 @@ export function insertPlace(
     exactIndustry?: string;
   }
 ): string {
+  const isSocial = isSocialMediaUrl(p.website);
+  const finalWebsite = isSocial ? undefined : p.website;
   const id = crypto.randomBytes(8).toString('hex');
-  const enrichStatus: EnrichStatus = p.website ? 'pending' : 'no_website';
+  const enrichStatus: EnrichStatus = finalWebsite ? 'pending' : 'no_website';
   db.prepare(`
     INSERT INTO places
       (id, session_id, job_id, name, website, phone, rating, reviews, hours, price, address, place_key, exact_industry, enrich_status, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, sessionId, jobId,
-    p.name, p.website ?? null, p.phone ?? null,
+    p.name, finalWebsite ?? null, p.phone ?? null,
     p.rating ?? null, p.reviews ?? null,
     p.hours ?? null, p.price ?? null, p.address ?? null, p.placeKey ?? null,
     p.exactIndustry ?? null,
@@ -300,13 +361,15 @@ export function insertPlace(
  * Atomically claim the next place ready for enrichment.
  * Returns null when none available.
  */
-export function claimNextPlace(db: Database.Database, sessionId: string): PlaceRow | null {
+export function claimNextPlace(db: Database.Database, sessionId: string): ClaimedPlaceRow | null {
   return db.transaction(() => {
     const place = db.prepare(`
-      SELECT * FROM places
-      WHERE session_id = ? AND enrich_status = 'pending'
-      ORDER BY rowid ASC LIMIT 1
-    `).get(sessionId) as PlaceRow | undefined;
+      SELECT p.*, j.stadt, j.branche 
+      FROM places p
+      JOIN jobs j ON j.id = p.job_id
+      WHERE p.session_id = ? AND p.enrich_status = 'pending'
+      ORDER BY p.rowid ASC LIMIT 1
+    `).get(sessionId) as ClaimedPlaceRow | undefined;
 
     if (!place) return null;
 
@@ -346,15 +409,15 @@ export function updatePlaceEnriched(
  * Fetch enrichment-done places that haven't been streamed yet.
  * Marks them as streamed atomically.
  */
-export function drainStreamable(db: Database.Database, sessionId: string): PlaceRow[] {
+export function drainStreamable(db: Database.Database, sessionId: string): ClaimedPlaceRow[] {
   return db.transaction(() => {
     const rows = db.prepare(`
       SELECT p.*, j.stadt, j.branche FROM places p
       JOIN jobs j ON j.id = p.job_id
-      WHERE p.session_id = ? AND p.enrich_status IN ('done','skipped','no_website','error') AND p.streamed = 0
+      WHERE p.session_id = ? AND p.enrich_status IN ('done','skipped','no_website','error','success','no_match') AND p.streamed = 0
       ORDER BY p.rowid ASC
       LIMIT 50
-    `).all(sessionId) as PlaceRow[];
+    `).all(sessionId) as ClaimedPlaceRow[];
 
     if (rows.length > 0) {
       const ids = rows.map(r => `'${r.id}'`).join(',');
@@ -366,7 +429,7 @@ export function drainStreamable(db: Database.Database, sessionId: string): Place
 
 export function countPlaces(db: Database.Database, sessionId: string): { total: number; done: number } {
   const total = (db.prepare(`SELECT COUNT(*) as n FROM places WHERE session_id = ?`).get(sessionId) as { n: number }).n;
-  const done  = (db.prepare(`SELECT COUNT(*) as n FROM places WHERE session_id = ? AND enrich_status IN ('done','skipped','no_website','error')`).get(sessionId) as { n: number }).n;
+  const done  = (db.prepare(`SELECT COUNT(*) as n FROM places WHERE session_id = ? AND enrich_status IN ('done','skipped','no_website','error','success','no_match')`).get(sessionId) as { n: number }).n;
   return { total, done };
 }
 

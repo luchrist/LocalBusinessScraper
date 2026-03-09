@@ -42,38 +42,11 @@ export class GoogleMapsScraper {
     private page: Page;
     private minPrice?: number;
     private maxPrice?: number;
-    private whitelist: string[];
-    private blacklist: string[];
 
-    constructor(page: Page, minPrice?: number, maxPrice?: number, whitelist: string[] = [], blacklist: string[] = []) {
+    constructor(page: Page, minPrice?: number, maxPrice?: number) {
         this.page = page;
         this.minPrice = minPrice;
         this.maxPrice = maxPrice;
-        this.whitelist = whitelist;
-        this.blacklist = blacklist;
-    }
-
-    private matchesCategory(exactIndustry?: string): boolean {
-        if (!exactIndustry) return true; // Keep if no category found, prevents dropping legitimate leads.
-        const industryLower = exactIndustry.toLowerCase();
-
-        // Whitelist overrides blacklist
-        if (this.whitelist && this.whitelist.length > 0) {
-            const isWhitelisted = this.whitelist.some(term => industryLower.includes(term.toLowerCase()));
-            if (isWhitelisted) {
-                return true;
-            }
-            return false; // If whitelist is specified but doesn't match, reject and ignore blacklist
-        }
-
-        if (this.blacklist && this.blacklist.length > 0) {
-            const isBlacklisted = this.blacklist.some(term => industryLower.includes(term.toLowerCase()));
-            if (isBlacklisted) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private parsePrice(priceString: string): { lowerBound: number, upperBound: number } | null {
@@ -123,8 +96,8 @@ export class GoogleMapsScraper {
         const bounds = this.parsePrice(priceString);
         if (!bounds) return true;
 
-        if (this.minPrice !== undefined && bounds.lowerBound < this.minPrice) return false;
-        if (this.maxPrice !== undefined && bounds.upperBound > this.maxPrice) return false;
+        if (this.minPrice !== undefined && bounds.upperBound < this.minPrice) return false;
+        if (this.maxPrice !== undefined && bounds.lowerBound > this.maxPrice) return false;
 
         return true;
     }
@@ -348,33 +321,19 @@ export class GoogleMapsScraper {
                     const label = await card.getAttribute('aria-label');
                     if (!label || seen.has(label)) continue;
 
-                    logger.log(`[Maps] [${label}] Processing list item...`);
-                    
                     await card.scrollIntoViewIfNeeded();
                     await this.randomDelay(150, 400);
                     await this.humanMove(card);
                     await card.click();
-                    logger.log(`[Maps] [${label}] Clicked item, waiting for panel...`);
                     await this.randomDelay(400, 900);
 
-                    // ── Level 2: Soft block – detail panel must show matching <h1> within 5 s ──
+                    // ── Level 2: Soft block – detail panel must show <h1> within 5 s ──
                     try {
-                        await this.page.waitForFunction((expectedLabel: string) => {
-                            const h1s = Array.from(document.querySelectorAll('h1'));
-                            return h1s.some(h1 => {
-                                if (!h1 || !h1.textContent) return false;
-                                const text = h1.textContent.trim().toLowerCase();
-                                const expected = expectedLabel.toLowerCase();
-                                return text.includes(expected) || expected.includes(text);
-                            });
-                        }, label, { timeout: 5000 });
+                        await this.page.waitForSelector('h1', { state: 'visible', timeout: 5000 });
                         consecutiveTimeouts = 0; // panel loaded → reset counter
-                        logger.log(`[Maps] [${label}] Detail panel loaded successfully`);
                     } catch {
-                        // Log exactly what h1s are on the page to debug the issue
-                        const h1Info = await this.page.$$eval('h1', els => els.map(e => e.textContent?.trim() || ''));
                         consecutiveTimeouts++;
-                        logger.warn(`[Maps] [${label}] Panel timeout #${consecutiveTimeouts} for "${label}". Found H1s: ${JSON.stringify(h1Info)}`);
+                        logger.warn(`[Maps] Panel timeout #${consecutiveTimeouts} for "${label}"`);
                         if (consecutiveTimeouts >= 2) {
                             throw new BlockDetectionError(2,
                                 `Soft block: detail panel failed to load ${consecutiveTimeouts}× in a row`);
@@ -384,21 +343,6 @@ export class GoogleMapsScraper {
 
                     // ── Level 1: Re-check after click (URL may have changed) ──────────
                     await this.checkForHardBlock();
-
-                    // ── Extra wait for address to prevent empty location string ──────────
-                    try {
-                        logger.log(`[Maps] [${label}] Waiting for address indicator to attach...`);
-                        await this.page.waitForSelector('button[data-item-id="address"]', { 
-                            state: 'attached', 
-                            timeout: 3000 
-                        });
-                    } catch {
-                        // Address might not exist (e.g., service area businesses), continue.
-                        logger.log(`[Maps] [${label}] Timeout waiting for address indicator (normal for service areas)`);
-                    }
-
-                    // A slightly longer delay to ensure everything settles since enrichment is slower anyway
-                    await this.randomDelay(800, 1500);
 
                     const details = await this.extractDetails(label);
                     if (details) {
@@ -419,18 +363,10 @@ export class GoogleMapsScraper {
                         seen.add(label);
                         noNew = 0;
                         
-                        const priceMatched = this.matchesPrice(details.price);
-                        const categoryMatched = this.matchesCategory(details.exactIndustry);
-                        
-                        if (priceMatched && categoryMatched) {
+                        if (this.matchesPrice(details.price)) {
                             yield details;
                         } else {
-                            if (!priceMatched) {
-                                logger.log(`[Maps] Skipped "${label}" due to price filter (Found: ${details.price})`);
-                            }
-                            if (!categoryMatched) {
-                                logger.log(`[Maps] Skipped "${label}" due to category filter (Found: ${details.exactIndustry})`);
-                            }
+                            logger.log(`[Maps] Skipped "${label}" due to price filter (Found: ${details.price})`);
                         }
                     }
 
@@ -476,23 +412,14 @@ export class GoogleMapsScraper {
     }
 
     private async extractDetails(name: string): Promise<PlaceResult | null> {
-        logger.log(`[Maps] [${name}] Starting details extraction`);
         try {
             const result: PlaceResult = { name };
 
             // Extract a stable key from the page URL (contains CID / place ID)
             try {
                 const url = this.page.url();
-                // Google Maps URL often has: /place/Name/@lat,lng,z/data=!4m5!3m4!1s0xHEX:0xHEX!8m2!...
-                const m = url.match(/!1s(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+)/);
-                if (m) {
-                    result.placeKey = m[1];
-                    logger.log(`[Maps] [${name}] Extracted placeKey: ${result.placeKey}`);
-                } else {
-                    // Fallback to name and address if URL doesn't contain the data ID
-                    result.placeKey = undefined;
-                    logger.log(`[Maps] [${name}] No placeKey found in URL`);
-                }
+                const m   = url.match(/place\/[^/]+\/([@\w!,+.-]+)/);
+                result.placeKey = m ? m[1] : undefined;
             } catch {}
 
             // Website
@@ -506,14 +433,10 @@ export class GoogleMapsScraper {
                             const { domainToUnicode } = require('node:url');
                             urlObj.hostname = domainToUnicode(urlObj.hostname);
                             result.website = urlObj.toString();
-                            logger.log(`[Maps] [${name}] Extracted website: ${result.website}`);
                         } catch {
                             result.website = href;
-                            logger.log(`[Maps] [${name}] Extracted website (raw): ${result.website}`);
                         }
                     }
-                } else {
-                    logger.log(`[Maps] [${name}] No website found`);
                 }
             } catch { }
 
@@ -527,91 +450,52 @@ export class GoogleMapsScraper {
                         // That prevents the ^ anchor in Regex from cleanly matching the start of the string.
                         let cleanLabel = label.replace(/[\u200B-\u200D\uFEFF\u202A-\u202E]/g, '');
                         result.phone = cleanLabel.replace(/^(Phone|Telefon):\s*/i, '').trim();
-                        logger.log(`[Maps] [${name}] Extracted phone: ${result.phone}`);
                     }
-                } else {
-                    logger.log(`[Maps] [${name}] No phone number found`);
                 }
             } catch { }
 
             // Rating & Reviews
             try {
-                // Get the detail panel specifically so we don't accidentally grab data from the background list
-                // To avoid waiting for 30s, we use $$ to get the elements instantly and pick the last one.
-                const mainDivs = await this.page.$$('div[role="main"]');
-                const panel = mainDivs.length > 0 ? mainDivs[mainDivs.length - 1] : null;
+                const ratingText = await this.page.$eval(
+                    '.F7nice span[aria-hidden="true"]',
+                    el => el.textContent
+                ).catch(() => null);
 
-                if (panel) {
-                    const ratingText = await panel.evaluate((node) => {
-                        const el = node.querySelector('.F7nice span[aria-hidden="true"]');
-                        return el ? el.textContent : null;
-                    }).catch(() => null);
-
-                    if (ratingText) {
-                        result.rating = parseFloat(ratingText.replace(',', '.'));
-                        logger.log(`[Maps] [${name}] Extracted rating: ${result.rating}`);
-                    }
-
-                    const reviewLabel = await panel.evaluate((node) => {
-                        const el = node.querySelector('.F7nice span[aria-label*="reviews" i], .F7nice span[aria-label*="Rezensionen" i]');
-                        return el ? el.getAttribute('aria-label') : null;
-                    }).catch(() => null);
-
-                    if (reviewLabel) {
-                        const match = reviewLabel.match(/(\d[\d,.]*)/);
-                        if (match) {
-                            result.reviews = parseInt(match[0].replace(/[,.]/g, ''));
-                            logger.log(`[Maps] [${name}] Extracted reviews: ${result.reviews}`);
-                        }
-                    }
+                if (ratingText) {
+                    result.rating = parseFloat(ratingText.replace(',', '.'));
                 }
-                
-                if (!result.rating) {
-                    logger.log(`[Maps] [${name}] No rating found`);
+
+                const reviewLabel = await this.page.$eval(
+                    '.F7nice span[aria-label*="reviews" i], .F7nice span[aria-label*="Rezensionen" i]',
+                    el => el.getAttribute('aria-label')
+                ).catch(() => null);
+
+                if (reviewLabel) {
+                    const match = reviewLabel.match(/(\d[\d,.]*)/);
+                    if (match) {
+                        result.reviews = parseInt(match[0].replace(/[,.]/g, ''));
+                    }
                 }
             } catch { }
 
             // Price Extractions
             try {
-                const mainDivs = await this.page.$$('div[role="main"]');
-                const panel = mainDivs.length > 0 ? mainDivs[mainDivs.length - 1] : null;
-                
-                if (panel) {
-                    // First try to find elements with specific price aria-labels within the main panel
-                    const explicitPrice = await panel.evaluate((node) => {
-                        const el = node.querySelector('span[role="img"][aria-label*="Preis" i], span[role="img"][aria-label*="Price" i], span[role="img"][aria-label*="Preiskategorie" i]');
-                        return el ? el.textContent : null;
-                    }).catch(() => null);
-
-                    if (explicitPrice && explicitPrice.includes('€')) {
-                        result.price = explicitPrice.replace(/^[·•\-\s]+/, '').trim();
-                        logger.log(`[Maps] [${name}] Extracted price (aria): "${result.price}"`);
-                    } else {
-                        // Fallback to searching spans within the place detail panel
-                        // This explicitly ignores the sidebar search results!
-                        const spans = await panel.evaluate((node) => {
-                            return Array.from(node.querySelectorAll('span')).map(e => e.textContent || '');
-                        }).catch(() => [] as string[]);
-                        for (const text of spans) {
-                            let cleanText = text.replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
-                            // Clean up leading dots or whitespace (e.g. "· 10-20 €" or "· €€")
-                            cleanText = cleanText.replace(/^[·•\-\s]+/, '').trim();
-                            if (cleanText.includes('€')) {
-                                // If it's a relatively short text snippet containing at least one digit or multiple € signs
-                                if (cleanText.length < 40 && (/\d/.test(cleanText) || /€{2,}/.test(cleanText))) {
-                                    result.price = cleanText;
-                                    logger.log(`[Maps] [${name}] Extracted price: "${result.price}"`);
-                                    break;
-                                }
-                            }
+                const spans = await this.page.$$eval('span', els => els.map(e => e.textContent || ''));
+                for (const text of spans) {
+                    let cleanText = text.replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
+                    // Clean up leading dots or whitespace (e.g. "· €€")
+                    cleanText = cleanText.replace(/^[·•\-\s]+/, '').trim();
+                    if (cleanText.includes('€')) {
+                        // If it's a relatively short text snippet containing at least one digit or multiple € signs
+                        if (cleanText.length < 40 && (/\d/.test(cleanText) || /€{2,}/.test(cleanText))) {
+                            result.price = cleanText;
+                            logger.log(`[Maps] Extracted price: "${result.price}"`);
+                            break;
                         }
                     }
                 }
-                if (!result.price) {
-                    logger.log(`[Maps] [${name}] No price found`);
-                }
             } catch (e) {
-                logger.error(`[Maps] [${name}] Error extracting price:`, e);
+                logger.error('[Maps] Error extracting price:', e);
             }
 
             // Exact Industry
@@ -621,10 +505,7 @@ export class GoogleMapsScraper {
                     const text = await categoryBtn.textContent();
                     if (text) {
                         result.exactIndustry = text.trim();
-                        logger.log(`[Maps] [${name}] Extracted industry: ${result.exactIndustry}`);
                     }
-                } else {
-                    logger.log(`[Maps] [${name}] No exact industry found`);
                 }
             } catch { }
 
@@ -655,7 +536,7 @@ export class GoogleMapsScraper {
                         }
                         if (hoursList.length > 0) {
                             result.hours = hoursList.join(' | ');
-                            logger.log(`[Maps] [${name}] Extracted hours (table): ${result.hours}`);
+                            logger.log(`[Maps] Extracted hours (table): ${result.hours}`);
                         }
                     }
                     
@@ -666,7 +547,7 @@ export class GoogleMapsScraper {
                             const hoursText = await hoursTable.innerText();
                             if (hoursText && hoursText.length > 10) {
                                 result.hours = hoursText.replace(/\n/g, ', ');
-                                logger.log(`[Maps] [${name}] Extracted hours (presentation table): ${result.hours}`);
+                                logger.log(`[Maps] Extracted hours (presentation table): ${result.hours}`);
                             }
                         }
                     }
@@ -679,16 +560,16 @@ export class GoogleMapsScraper {
                         const rawHours = (await hoursBtn.getAttribute('aria-label')) || (await hoursBtn.innerText());
                         if (rawHours) {
                             result.hours = rawHours.replace(/\n/g, ' ').trim();
-                            logger.log(`[Maps] [${name}] Extracted hours (button fallback): ${result.hours}`);
+                            logger.log(`[Maps] Extracted hours (button fallback): ${result.hours}`);
                         }
                     }
                 }
                 
                 if (!result.hours) {
-                    logger.log(`[Maps] [${name}] Could not extract hours for ${name}`);
+                    logger.log(`[Maps] Could not extract hours for ${name}`);
                 }
             } catch (e) {
-                logger.error(`[Maps] [${name}] Error extracting hours:`, e);
+                logger.error('[Maps] Error extracting hours:', e);
             }
 
             // Address
@@ -700,18 +581,14 @@ export class GoogleMapsScraper {
                         // Strip invisible characters to ensure clean replacement and db storage
                         let cleanLabel = label.replace(/[\u200B-\u200D\uFEFF\u202A-\u202E]/g, '');
                         result.address = cleanLabel.replace(/^(Address|Adresse):\s*/i, '').trim();
-                        logger.log(`[Maps] [${name}] Extracted address: ${result.address}`);
                     }
-                } else {
-                    logger.log(`[Maps] [${name}] No address found`);
                 }
             } catch { }
 
-            logger.log(`[Maps] [${name}] Finished details extraction successfully`);
             return result;
 
         } catch (e) {
-            logger.error(`[Maps] [${name}] Error extracting details:`, e);
+            logger.error('Error extracting details:', e);
             return null;
         }
     }
