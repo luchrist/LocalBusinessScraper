@@ -276,6 +276,8 @@ export async function POST(request: NextRequest) {
 
       // ── Block detection state ─────────────────────────────────────────
       let mapsPaused = false; // set to true when a block is detected
+      let softBlockWarningActive = false;
+      let placesScrapedSinceWarning = 0;
 
       // ── Unified pipeline: per-row decision API (effectiveMax ≤ 60) vs Scraping (> 60) ──
       const hasScrapingRows = data.some(row => (row.max_results ?? maxBusinesses) > 60);
@@ -550,85 +552,143 @@ export async function POST(request: NextRequest) {
           // ── SCRAPING PATH ──────────────────────────────────────────────────
           // Create a job row in SQLite so place FK is satisfied
           const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results });
-          const worker = await pool.acquire();
-          try {
-            const scraper = new GoogleMapsScraper(worker.page!, minPrice, maxPrice, categoryWhitelist, categoryBlacklist);
-            await scraper.search(stadt, branche);
+          
+          let retryPlaceName: string | undefined = undefined;
+          let isSecondAttempt = false;
 
-            let scraped = 0;
-            for await (const place of scraper.scrape(request.signal)) {
-              if (isSessionCancelled(db, sessionId)) break;
-              if (effectiveMax !== Infinity && scraped >= effectiveMax) break;
+          while (true) {
+            if (isSessionCancelled(db, sessionId)) break;
 
-              // Kombiniere Name UND Adresse strikt als Fallback, falls Google keine saubere ID liefert
-              const fallbackKey = `${place.name} --- ${place.address ? place.address : 'Ohne Adresse'}`;
-              const placeKey = place.placeKey ? place.placeKey : fallbackKey;
+            let workerReleased = false;
+            const worker = await pool.acquire();
 
-              if (seenPlaceIds.has(placeKey)) {
-                logger.log(`♻️ [Scraping] Skipping duplicate place ID/Key: ${placeKey} (Name: ${place.name})`);
-                continue;
+            try {
+              const scraper = new GoogleMapsScraper(
+                  worker.page!, minPrice, maxPrice, categoryWhitelist, categoryBlacklist,
+                  retryPlaceName, isSecondAttempt
+              );
+              await scraper.search(stadt, branche);
+
+              let scraped = 0;
+              for await (const place of scraper.scrape(request.signal)) {
+                if (isSessionCancelled(db, sessionId)) break;
+                if (effectiveMax !== Infinity && scraped >= effectiveMax) break;
+
+                if (softBlockWarningActive) {
+                    placesScrapedSinceWarning++;
+                    if (placesScrapedSinceWarning >= 5) {
+                        logger.log(`[SoftBlock] Processed 5 places safely. Warning cleared.`);
+                        softBlockWarningActive = false;
+                        await sendProgress({
+                          type: 'progress',
+                          message: 'Scraping fortgesetzt. Blockierung war wohl temporär.',
+                          current: processedBusinesses,
+                          total: totalBusinessesFound,
+                          searchCount,
+                          totalSearches,
+                        });
+                    }
+                }
+
+                // Kombiniere Name UND Adresse strikt als Fallback, falls Google keine saubere ID liefert
+                const fallbackKey = `${place.name} --- ${place.address ? place.address : 'Ohne Adresse'}`;
+                const placeKey = place.placeKey ? place.placeKey : fallbackKey;
+
+                if (seenPlaceIds.has(placeKey)) {
+                  logger.log(`♻️ [Scraping] Skipping duplicate place ID/Key: ${placeKey} (Name: ${place.name})`);
+                  continue;
+                }
+                let domain: string | null = null;
+                if (place.website) {
+                  try { domain = new URL(place.website).hostname.replace(/^www\./, ''); } catch {}
+                }
+                if (domain && seenDomains.has(domain)) {
+                  logger.log(`♻️ [Scraping] Skipping duplicate domain: ${domain} (${place.name})`);
+                  continue;
+                }
+                seenPlaceIds.add(placeKey);
+                if (domain) seenDomains.add(domain);
+
+                // Write to SQLite (disk) immediately so the placeholder exists
+                const placeKey2 = place.placeKey || `${place.name}|${place.address ?? ''}`;
+                insertPlace(db, sessionId, jobId, {
+                  name: place.name, website: place.website ?? undefined,
+                  phone: place.phone ?? undefined, rating: place.rating ?? undefined,
+                  reviews: place.reviews ?? undefined, hours: place.hours ?? undefined,
+                  price: (place as any).price ?? undefined,
+                  address: place.address ?? undefined, placeKey: placeKey2,
+                  exactIndustry: (place as any).exactIndustry ?? undefined,
+                });
+
+                totalBusinessesFound++;
+                await sendProgress({
+                  type: 'progress',
+                  message: `[Scraping] Found ${place.name}`,
+                  current: processedBusinesses, // progress updated by enrichment worker
+                  total: totalBusinessesFound,
+                  searchCount,
+                  totalSearches,
+                });
+
+                scraped++;
               }
-              let domain: string | null = null;
-              if (place.website) {
-                try { domain = new URL(place.website).hostname.replace(/^www\./, ''); } catch {}
+            } catch (e) {
+              if (e instanceof BlockDetectionError) {
+                if (e.level === 2) {
+                    if (!isSecondAttempt) {
+                        logger.warn(`[SoftBlock] First soft block detected at "${e.placeName}". Restarting browser and retrying...`);
+                        retryPlaceName = e.placeName;
+                        isSecondAttempt = true;
+                        try { await worker.resetContext(true); } catch {}
+                        pool.release(worker);
+                        workerReleased = true;
+                        continue; // try again
+                    } else {
+                        if (softBlockWarningActive && placesScrapedSinceWarning < 5) {
+                            logger.error(`[SoftBlock] Soft block CONFIRMED within first 5 places. Stopping all scrapes.`);
+                            mapsPaused = true;
+                            await sendProgress({
+                                type: 'error',
+                                message: 'Google Maps hat die Anfragen blockiert (Soft Block 2 bestätigt). Alle weiteren Scrapes werden abgebrochen.',
+                            });
+                        } else {
+                            logger.warn(`[SoftBlock] Second attempt failed at "${e.placeName}". Skipping to next row.`);
+                            softBlockWarningActive = true;
+                            placesScrapedSinceWarning = 0;
+                            await sendProgress({
+                                type: 'warning',
+                                message: `Soft Block Warnung bei "${branche}" in "${stadt}". Überspringe diesen Scrape...`,
+                            });
+                        }
+                    }
+                } else {
+                  mapsPaused = true;
+                  const levelLabels: Record<number, string> = {
+                    1: 'Hard Block (CAPTCHA / 403)',
+                    2: 'Soft Block (Detail-Panel lädt nicht)',
+                    3: 'Ghost Block (Keine API-Daten)',
+                  };
+                  const label = levelLabels[e.level] ?? `Level ${e.level}`;
+                  logger.warn(`[BlockDetection] Level ${e.level} – ${label}: ${e.message}`);
+                  await sendProgress({
+                    type: 'blocked',
+                    level: e.level,
+                    label,
+                    message: e.message,
+                  });
+                }
+              } else {
+                logger.error(`[Scraping] Error for "${branche}" in "${stadt}":`, e);
               }
-              if (domain && seenDomains.has(domain)) {
-                logger.log(`♻️ [Scraping] Skipping duplicate domain: ${domain} (${place.name})`);
-                continue;
+            } finally {
+              if (!workerReleased) {
+                if (rowIdx !== lastScrapingRowIdx) {
+                  try { await worker.resetContext(); } catch {}
+                }
+                pool.release(worker);
               }
-              seenPlaceIds.add(placeKey);
-              if (domain) seenDomains.add(domain);
-
-              totalBusinessesFound++;
-              await sendProgress({
-                type: 'progress',
-                message: `[Scraping] Found ${place.name}`,
-                current: processedBusinesses, // progress updated by enrichment worker
-                total: totalBusinessesFound,
-                searchCount,
-                totalSearches,
-              });
-
-              // Write to SQLite (disk) immediately so the placeholder exists
-              const placeKey2 = place.placeKey || `${place.name}|${place.address ?? ''}`;
-              insertPlace(db, sessionId, jobId, {
-                name: place.name, website: place.website ?? undefined,
-                phone: place.phone ?? undefined, rating: place.rating ?? undefined,
-                reviews: place.reviews ?? undefined, hours: place.hours ?? undefined,
-                price: (place as any).price ?? undefined,
-                address: place.address ?? undefined, placeKey: placeKey2,
-                exactIndustry: (place as any).exactIndustry ?? undefined,
-              });
-
-              scraped++;
             }
-          } catch (e) {
-            if (e instanceof BlockDetectionError) {
-              mapsPaused = true;
-              const levelLabels: Record<number, string> = {
-                1: 'Hard Block (CAPTCHA / 403)',
-                2: 'Soft Block (Detail-Panel lädt nicht)',
-                3: 'Ghost Block (Keine API-Daten)',
-              };
-              const label = levelLabels[e.level] ?? `Level ${e.level}`;
-              logger.warn(`[BlockDetection] Level ${e.level} – ${label}: ${e.message}`);
-              await sendProgress({
-                type: 'blocked',
-                level: e.level,
-                label,
-                message: e.message,
-              });
-              // Results collected so far are kept; do not mark as fatal error
-            } else {
-              logger.error(`[Scraping] Error for "${branche}" in "${stadt}":`, e);
-            }
-          } finally {
-            // Skip resetContext on the last task – pool.close() will clean up immediately after,
-            // so launching a fresh browser/context just to discard it is wasteful.
-            if (rowIdx !== lastScrapingRowIdx) {
-              try { await worker.resetContext(); } catch {}
-            }
-            pool.release(worker);
+            break; // exit while loop if we made it here (success, hard block, error, or second attempt fail)
           }
           // Close the Maps browser immediately once the last scraping task is done
           if (rowIdx === lastScrapingRowIdx && !poolClosed) {
