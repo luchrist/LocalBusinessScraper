@@ -968,15 +968,31 @@ export default function BusinessScraper() {
                     {t.downloadAll}
                   </button>
                   {sessionId && (
-                    <a
-                      href={`/api/history/${sessionId}/download?split=true`}
-                      className="bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors flex items-center text-sm"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      <Download className="w-4 h-4 mr-2" />
-                      {t.downloadSplit}
-                    </a>
+                    <div className="relative group inline-block">
+                      <button className="bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors flex items-center text-sm">
+                        <Download className="w-4 h-4 mr-2" />
+                        {t.downloadSplit}
+                        <ChevronDown className="w-4 h-4 ml-1" />
+                      </button>
+                      <div className="absolute right-0 mt-1 w-40 bg-white border border-gray-200 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                        <a
+                          href={`/api/history/${sessionId}/download?split=true&format=excel`}
+                          className="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-t-lg"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Excel (.xlsx)
+                        </a>
+                        <a
+                          href={`/api/history/${sessionId}/download?split=true&format=zip`}
+                          className="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-b-lg border-t border-gray-100"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          CSV (ZIP)
+                        </a>
+                      </div>
+                    </div>
                   )}
                 </div>
               </div>
@@ -1125,14 +1141,30 @@ export default function BusinessScraper() {
                                >
                                  <Download className="w-4 h-4" /> CSV
                                </a>
-                               <a
-                                 href={`/api/history/${session.id}/download?split=true`}
-                                 className="font-medium text-green-600 hover:text-green-800 flex items-center gap-1 whitespace-nowrap"
-                                 target="_blank"
-                                 rel="noopener noreferrer"
-                               >
-                                 <Download className="w-4 h-4" /> Aufgeteilt
-                               </a>
+                               <div className="relative group inline-block">
+                                 <button className="font-medium text-green-600 hover:text-green-800 flex items-center gap-1 whitespace-nowrap">
+                                   <Download className="w-4 h-4" /> Aufgeteilt
+                                   <ChevronDown className="w-3 h-3" />
+                                 </button>
+                                 <div className="absolute left-0 mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                                   <a
+                                     href={`/api/history/${session.id}/download?split=true&format=excel`}
+                                     className="block px-3 py-2 text-xs text-gray-700 hover:bg-green-50 hover:text-green-700 rounded-t-lg"
+                                     target="_blank"
+                                     rel="noopener noreferrer"
+                                   >
+                                     Excel (.xlsx)
+                                   </a>
+                                   <a
+                                     href={`/api/history/${session.id}/download?split=true&format=zip`}
+                                     className="block px-3 py-2 text-xs text-gray-700 hover:bg-green-50 hover:text-green-700 rounded-b-lg border-t border-gray-100"
+                                     target="_blank"
+                                     rel="noopener noreferrer"
+                                   >
+                                     CSV (ZIP)
+                                   </a>
+                                 </div>
+                               </div>
                              </div>
                            </td>
                          </tr>

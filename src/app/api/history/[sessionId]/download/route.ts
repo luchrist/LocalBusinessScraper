@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import Database from 'better-sqlite3';
 import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 import { getAllPlaces } from '@/lib/db';
 import { normalizeOwnerNameString } from '@/lib/owner-name-normalizer';
 
@@ -33,7 +34,9 @@ export async function GET(
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
-  const splitMode = new URL(request.url).searchParams.get('split') === 'true';
+  const urlParams = new URL(request.url).searchParams;
+  const splitMode = urlParams.get('split') === 'true';
+  const format = urlParams.get('format') || 'zip';
   if (!sessionId) {
     return NextResponse.json({ error: 'Session ID required' }, { status: 400 });
   }
@@ -91,8 +94,9 @@ export async function GET(
         const p = places[i];
         const row = csvData[i];
         const hasOwnerName = !!(row['Geschäftsführer Vorname']?.trim() || row['Geschäftsführer Nachname']?.trim());
-        if (!hasOwnerName) ohneNameRows.push(row);
-        if (!p.email?.trim()) ohneEmailRows.push(row);
+        const hasEmail = !!p.email?.trim();
+        if (!hasOwnerName && hasEmail) ohneNameRows.push(row);
+        if (!hasEmail) ohneEmailRows.push(row);
         const { isAnredeNachname, isFirstnameNoAnrede } = classifyOwner(
           row['Anrede'],
           row['Geschäftsführer Vorname'],
@@ -102,22 +106,52 @@ export async function GET(
         if (isFirstnameNoAnrede) vornameOhneAnredeRows.push(row);
       }
 
-      const wbSplit = XLSX.utils.book_new();
-      const appendSheet = (data: typeof csvData, name: string) => {
-        XLSX.utils.book_append_sheet(wbSplit, XLSX.utils.json_to_sheet(data), name);
-      };
-      appendSheet(ohneNameRows, 'Ohne Name');
-      appendSheet(ohneEmailRows, 'Ohne Email');
-      appendSheet(anredeNachnameRows, 'Anrede + Nachname');
-      appendSheet(vornameOhneAnredeRows, 'Vorname ohne Anrede');
+      if (format === 'excel') {
+        const wbSplit = XLSX.utils.book_new();
+        const appendSheet = (data: typeof csvData, name: string) => {
+          XLSX.utils.book_append_sheet(wbSplit, XLSX.utils.json_to_sheet(data), name);
+        };
+        appendSheet(ohneNameRows, 'Ohne Name');
+        appendSheet(ohneEmailRows, 'Ohne Email');
+        appendSheet(anredeNachnameRows, 'Anrede + Nachname');
+        appendSheet(vornameOhneAnredeRows, 'Vorname ohne Anrede');
 
-      const xlsxBuffer = XLSX.write(wbSplit, { type: 'buffer', bookType: 'xlsx' });
+        const xlsxBuffer = XLSX.write(wbSplit, { type: 'buffer', bookType: 'xlsx' });
+        db.close();
+        db = null;
+        return new NextResponse(xlsxBuffer, {
+          headers: {
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Content-Disposition': `attachment; filename="results-split-${sessionId}.xlsx"`,
+          },
+        });
+      }
+
+      // Default to ZIP
+      const zip = new JSZip();
+
+      const addCsvToZip = (data: typeof csvData, name: string) => {
+        const wbCsv = XLSX.utils.book_new();
+        const wsCsv = XLSX.utils.json_to_sheet(data);
+        XLSX.utils.book_append_sheet(wbCsv, wsCsv, 'Results');
+        const csvBufferData = XLSX.write(wbCsv, { type: 'buffer', bookType: 'csv' });
+        const csvBuffer = Buffer.concat([Buffer.from('\xEF\xBB\xBF', 'binary'), csvBufferData]);
+        zip.file(`${name}.csv`, csvBuffer);
+      };
+
+      addCsvToZip(ohneNameRows, 'Ohne_Name');
+      addCsvToZip(ohneEmailRows, 'Ohne_Email');
+      addCsvToZip(anredeNachnameRows, 'Anrede_Nachname');
+      addCsvToZip(vornameOhneAnredeRows, 'Vorname_ohne_Anrede');
+
+      const zipBuffer = await zip.generateAsync({ type: 'uint8array' });
+
       db.close();
       db = null;
-      return new NextResponse(xlsxBuffer, {
+      return new NextResponse(zipBuffer as unknown as BodyInit, {
         headers: {
-          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          'Content-Disposition': `attachment; filename="results-split-${sessionId}.xlsx"`,
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="results-split-${sessionId}.zip"`,
         },
       });
     }
