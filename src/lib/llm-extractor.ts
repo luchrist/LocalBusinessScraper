@@ -149,9 +149,30 @@ JSON Response:`;
     // Send task to worker
     worker.postMessage({ type: 'PROMPT', id, prompt });
 
-    // Wait for response from worker
+    // Wait for response from worker with timeout
     const response: string = await new Promise((resolve, reject) => {
-      pendingTasks.set(id, { resolve, reject });
+      let resolved = false;
+      const timeoutId = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        pendingTasks.delete(id);
+        reject(new Error("LLM Worker response timeout"));
+      }, 45000);
+
+      pendingTasks.set(id, { 
+        resolve: (val) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeoutId);
+          resolve(val);
+        }, 
+        reject: (err) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeoutId);
+          reject(err);
+        }
+      });
     });
 
     logger.log("   🤖 LLM Response:", response);
@@ -290,7 +311,28 @@ Rules:
     worker.postMessage({ type: 'BINARY_CHOICE', id, prompt });
 
     const response: string = await new Promise((resolve, reject) => {
-      pendingTasks.set(id, { resolve, reject });
+      let resolved = false;
+      const timeoutId = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        pendingTasks.delete(id);
+        reject(new Error("LLM Worker response timeout"));
+      }, 30000);
+
+      pendingTasks.set(id, { 
+        resolve: (val) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeoutId);
+          resolve(val);
+        }, 
+        reject: (err) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeoutId);
+          reject(err);
+        }
+      });
     });
 
     const parsed = JSON.parse(response.trim()) as { choice?: 'line1' | 'line2' };

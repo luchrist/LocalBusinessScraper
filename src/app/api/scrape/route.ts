@@ -3,13 +3,13 @@ import { logger } from '@/lib/logger';
 import os from 'os';
 import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
-import { chromium, BrowserContext } from 'playwright';
+import { chromium, BrowserContext, Browser } from 'playwright';
 import { findContactInfo } from '@/lib/email-scraper';
 import { GoogleMapsScraper, BlockDetectionError } from '@/lib/maps-scraper';
 import { ScraperPool } from '@/lib/scraper-pool';
 import { getNextAvailableKey, incrementApiKeyUsage, initSettingsDb } from '@/lib/settings-db';
 import {
-  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, drainStreamable, isSessionCancelled,
+  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, hasUnfinishedWork, drainStreamable, isSessionCancelled,
   type EnrichStatus,
 } from '@/lib/db';
 
@@ -228,7 +228,7 @@ export async function POST(request: NextRequest) {
 
       const seenPlaceIds = new Set<string>();
       const seenDomains = new Set<string>();
-      
+
       const browser = await chromium.launch({  
         headless: true,
         args: [
@@ -250,20 +250,15 @@ export async function POST(request: NextRequest) {
         });
 
         // OPTIMIZATION: Block images, fonts, css and analytics to save resources
-        await ctx.route('**/*', (route) => {
+        await ctx.route('**/*', (route: any) => {
           const type = route.request().resourceType();
           const url = route.request().url();
           
-          if (['image', 'font', 'stylesheet', 'media'].includes(type)) {
-            return route.abort();
-          }
-          
-          if (
-            url.includes('google-analytics') || 
-            url.includes('googletagmanager') || 
-            url.includes('facebook.com') || 
-            url.includes('doubleclick')
-          ) {
+          if (['image', 'font', 'stylesheet', 'media'].includes(type) ||
+              url.includes('google-analytics') || 
+              url.includes('googletagmanager') || 
+              url.includes('facebook.com') || 
+              url.includes('doubleclick')) {
             return route.abort();
           }
 
@@ -311,98 +306,117 @@ export async function POST(request: NextRequest) {
       async function runEnrichmentPoller() {
         // Runs until natural DB completion or explicit session cancel.
         // Client disconnect (sleep / tab close) does NOT stop this loop.
-        while (true) {
-          if (isSessionCancelled(db, sessionId)) {
-            logger.log('[Enrichment] Session cancelled – stopping worker.');
-            break;
-          }
-          const placeR = claimNextPlace(db, sessionId);
-          if (!placeR) {
-             const missedRows = drainStreamable(db, sessionId);
-             for (const row of missedRows) {
-               processedBusinesses++;
-               await sendProgress({
-                 type: 'result',
-                 result: {
-                   stadt: row.stadt, branche: row.branche, name: row.name, adresse: row.address ?? undefined,
-                   telefon: row.phone ?? undefined, website: row.website ?? undefined,
-                   email: row.email || undefined, owner: row.owner || undefined,
-                   ownerSalutations: row.owner_salutations || undefined,
-                   ownerFirstNames: row.owner_first_names || undefined,
-                   ownerLastNames: row.owner_last_names || undefined,
-                   status: row.enrich_status as any, hours: row.hours ?? undefined,
-                   price: row.price ?? undefined, rating: row.rating ?? undefined, reviews: row.reviews ?? undefined,
-                 },
-                 current: processedBusinesses, total: totalBusinessesFound,
-               });
-             }
-             if (mapsFinished && !hasPendingPlaces(db, sessionId)) {
-                 break;
-             }
-             await new Promise(r => setTimeout(r, 500));
-             continue;
-          }
-
-          let email: string | null = null;
-          let owner: string | null = null;
-          let ownerSalutations: string | null = null;
-          let ownerFirstNames: string | null = null;
-          let ownerLastNames: string | null = null;
-          let enrichStatus = 'no_website';
-
-          if (placeR.website && (searchEmail || searchOwner)) {
-            const siteContext = await createEnrichmentContext();
+          while (true) {
+            let currentPlaceId: string | null = null;
             try {
-              const info = await findContactInfo(siteContext, placeR.website, (msg) => logger.log(msg), {
-                searchEmail, searchOwner, country, businessName: placeR.name, industry: placeR.branche,
-              });
-              email = info.email;
-              owner = info.owner;
-              ownerSalutations = info.ownerSalutations;
-              ownerFirstNames = info.ownerFirstNames;
-              ownerLastNames = info.ownerLastNames;
-              enrichStatus = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
-            } catch (err) {
-              logger.error(`[Enrich] Error ${placeR.website}:`, err);
-              enrichStatus = 'error';
-            } finally {
-              await siteContext.close().catch(() => {});
+              if (isSessionCancelled(db, sessionId)) {
+                logger.log('[Enrichment] Session cancelled – stopping worker.');
+                break;
+              }
+            const placeR = claimNextPlace(db, sessionId);
+            if (!placeR) {
+              const missedRows = drainStreamable(db, sessionId);
+              for (const row of missedRows) {
+                processedBusinesses++;
+                await sendProgress({
+                  type: 'result',
+                  result: {
+                    stadt: row.stadt, branche: row.branche, name: row.name, adresse: row.address ?? undefined,
+                    telefon: row.phone ?? undefined, website: row.website ?? undefined,
+                    email: row.email || undefined, owner: row.owner || undefined,
+                    ownerSalutations: row.owner_salutations || undefined,
+                    ownerFirstNames: row.owner_first_names || undefined,
+                    ownerLastNames: row.owner_last_names || undefined,
+                    status: row.enrich_status as any, hours: row.hours ?? undefined,
+                    price: row.price ?? undefined, rating: row.rating ?? undefined, reviews: row.reviews ?? undefined,
+                  },
+                  current: processedBusinesses, total: totalBusinessesFound,
+                });
+              }
+              // Exit only when Maps is done AND no pending/enriching rows remain
+              // AND all terminal-state rows have been streamed (covers no_website / skipped).
+              if (mapsFinished && !hasUnfinishedWork(db, sessionId)) {
+                break;
+              }
+              await new Promise(r => setTimeout(r, 500));
+              continue;
             }
-          } else if (!placeR.website) {
-            enrichStatus = 'no_website';
-          } else {
-            enrichStatus = 'skipped';
+            
+            currentPlaceId = placeR.id;
+
+            let email: string | null = null;
+            let owner: string | null = null;
+            let ownerSalutations: string | null = null;
+            let ownerFirstNames: string | null = null;
+            let ownerLastNames: string | null = null;
+            let enrichStatus = 'no_website';
+
+            if (placeR.website && (searchEmail || searchOwner)) {
+              const siteContext = await createEnrichmentContext();
+              try {
+                const info = await findContactInfo(siteContext, placeR.website, (msg) => logger.log(msg), {
+                  searchEmail, searchOwner, country, businessName: placeR.name, industry: placeR.branche,
+                });
+                email = info.email;
+                owner = info.owner;
+                ownerSalutations = info.ownerSalutations;
+                ownerFirstNames = info.ownerFirstNames;
+                ownerLastNames = info.ownerLastNames;
+                enrichStatus = (searchEmail && email) || (searchOwner && owner) ? 'success' : 'no_match';
+              } catch (err) {
+                logger.error(`[Enrich] Error ${placeR.website}:`, err);
+                enrichStatus = 'error';
+              } finally {
+                await siteContext.close().catch(() => {});
+              }
+            } else if (!placeR.website) {
+              enrichStatus = 'no_website';
+            } else {
+              enrichStatus = 'skipped';
+            }
+
+            updatePlaceEnriched(db, placeR.id, {
+              email: email || null,
+              owner: owner || null,
+              ownerSalutations: ownerSalutations || null,
+              ownerFirstNames: ownerFirstNames || null,
+              ownerLastNames: ownerLastNames || null,
+              status: enrichStatus as EnrichStatus,
+            });
+
+            const scrapingResult: BusinessResult = {
+              stadt: placeR.stadt, branche: placeR.branche, name: placeR.name, adresse: placeR.address ?? undefined,
+              telefon: placeR.phone ?? undefined, website: placeR.website ?? undefined,
+              email: email || undefined,
+              owner: owner || undefined,
+              ownerSalutations: ownerSalutations || undefined,
+              ownerFirstNames: ownerFirstNames || undefined,
+              ownerLastNames: ownerLastNames || undefined,
+              status: enrichStatus, hours: placeR.hours ?? undefined,
+              price: placeR.price ?? undefined,
+              rating: placeR.rating ?? undefined, reviews: placeR.reviews ?? undefined,
+            };
+
+            db.prepare(`UPDATE places SET streamed = 1 WHERE id = ?`).run(placeR.id);
+
+            processedBusinesses++;
+            await sendProgress({
+              type: 'result', result: scrapingResult,
+              current: processedBusinesses, total: totalBusinessesFound,
+            });
+          } catch (err) {
+            // Catch unexpected errors (e.g. browser crash) so a single failed
+            // iteration doesn't silently kill the whole poller.
+            logger.error('[Enrichment] Worker iteration error – retrying in 1s:', err);
+            if (currentPlaceId) {
+              try {
+                updatePlaceEnriched(db, currentPlaceId, { status: 'error' });
+              } catch (updateErr) {
+                logger.error('[Enrichment] Failed to mark crashed place as error:', updateErr);
+              }
+            }
+            await new Promise(r => setTimeout(r, 1000));
           }
-
-          updatePlaceEnriched(db, placeR.id, {
-            email: email || null,
-            owner: owner || null,
-            ownerSalutations: ownerSalutations || null,
-            ownerFirstNames: ownerFirstNames || null,
-            ownerLastNames: ownerLastNames || null,
-            status: enrichStatus as EnrichStatus,
-          });
-
-          const scrapingResult: BusinessResult = {
-            stadt: placeR.stadt, branche: placeR.branche, name: placeR.name, adresse: placeR.address ?? undefined,
-            telefon: placeR.phone ?? undefined, website: placeR.website ?? undefined,
-            email: email || undefined,
-            owner: owner || undefined,
-            ownerSalutations: ownerSalutations || undefined,
-            ownerFirstNames: ownerFirstNames || undefined,
-            ownerLastNames: ownerLastNames || undefined,
-            status: enrichStatus, hours: placeR.hours ?? undefined,
-            price: placeR.price ?? undefined,
-            rating: placeR.rating ?? undefined, reviews: placeR.reviews ?? undefined,
-          };
-          
-          db.prepare(`UPDATE places SET streamed = 1 WHERE id = ?`).run(placeR.id);
-          
-          processedBusinesses++;
-          await sendProgress({
-            type: 'result', result: scrapingResult,
-            current: processedBusinesses, total: totalBusinessesFound,
-          });
         }
       }
 
@@ -483,7 +497,9 @@ export async function POST(request: NextRequest) {
           }
 
           logger.log(`✅ Deduplicated: ${places.length} -> ${uniquePlaces.length} unique new places`);
-          totalBusinessesFound += uniquePlaces.length;
+
+          // No longer adding totalBusinessesFound += uniquePlaces.length here
+          // because it is incremented inside the loop below!
 
           await sendProgress({
             type: 'progress',
@@ -651,6 +667,7 @@ export async function POST(request: NextRequest) {
       closeDb(sessionId);
 
       await browser.close();
+
       logger.log(`🎉 Scraping completed successfully. Total results: ${processedBusinesses}`);
 
       // No full results array sent – client has accumulated them via individual 'result' events

@@ -90,7 +90,8 @@ export async function GET(
       for (let i = 0; i < places.length; i++) {
         const p = places[i];
         const row = csvData[i];
-        if (!p.name?.trim()) ohneNameRows.push(row);
+        const hasOwnerName = !!(row['Geschäftsführer Vorname']?.trim() || row['Geschäftsführer Nachname']?.trim());
+        if (!hasOwnerName) ohneNameRows.push(row);
         if (!p.email?.trim()) ohneEmailRows.push(row);
         const { isAnredeNachname, isFirstnameNoAnrede } = classifyOwner(
           row['Anrede'],

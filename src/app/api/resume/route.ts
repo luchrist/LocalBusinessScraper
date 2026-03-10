@@ -18,7 +18,7 @@ import {
   openDb, closeDb, getSession, resetStaleJobs,
   claimNextJob, markJobDone, countJobs, updateSessionStatus,
   insertPlace, claimNextPlace, updatePlaceEnriched,
-  drainStreamable, countPlaces, hasPendingPlaces,
+  drainStreamable, countPlaces, hasPendingPlaces, getAllPlaces,
   type EnrichStatus,
 } from '@/lib/db';
 
@@ -94,6 +94,40 @@ export async function GET(request: NextRequest) {
 
       const seenPlaceIds = new Set<string>();
       const seenDomains  = new Set<string>();
+
+      // Pre-populate dedup sets from existing places so re-scraped jobs don't create duplicates
+      const existingPlaces = db.prepare(
+        `SELECT place_key, website FROM places WHERE session_id = ?`
+      ).all(sessionId) as { place_key: string | null; website: string | null }[];
+      for (const p of existingPlaces) {
+        if (p.place_key) seenPlaceIds.add(p.place_key);
+        if (p.website) {
+          try { seenDomains.add(new URL(p.website).hostname.replace(/^www\./, '')); } catch {}
+        }
+      }
+
+      // ── Send existing fully-enriched results to frontend immediately ──
+      const allDBPlaces = getAllPlaces(db, sessionId);
+      const c = countPlaces(db, sessionId);
+      for (const row of allDBPlaces) {
+        if (['done', 'skipped', 'no_website', 'error', 'success', 'no_match'].includes(row.enrich_status)) {
+          await send({
+            type: 'result',
+            result: {
+              stadt: (row as any).stadt ?? '', branche: (row as any).branche ?? '',
+              name: row.name, adresse: row.address ?? undefined,
+              telefon: row.phone ?? undefined, website: row.website ?? undefined,
+              email: row.email ?? undefined, owner: row.owner ?? undefined,
+              ownerFirstNames: row.owner_first_names ?? undefined,
+              ownerLastNames: row.owner_last_names ?? undefined,
+              hours: row.hours ?? undefined, rating: row.rating ?? undefined,
+              reviews: row.reviews ?? undefined,
+              status: row.enrich_status === 'done' ? 'success' : row.enrich_status,
+            },
+            current: c.done, total: c.total,
+          });
+        }
+      }
 
       // ── LOOP A: Maps scraping ────────────────────────────────────────────
       const mapsWorkerLoop = async () => {

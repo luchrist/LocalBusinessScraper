@@ -751,7 +751,19 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
       }
   };
 
-    return attemptScrape(retryLimit, result);
+    // Wrap the entire extraction chain in a hard timeout to prevent infinite hanging
+    const hardTimeoutMs = attemptTimeoutMs + 10000; // 10s buffer over internal deadline
+    const timeoutPromise = new Promise<ScrapeResult>((resolve) => {
+      setTimeout(() => {
+        logger(`   ⏳ Hard timeout reached (${hardTimeoutMs}ms). Returning partial result.`);
+        resolve(result);
+      }, hardTimeoutMs);
+    });
+
+    return Promise.race([
+      attemptScrape(retryLimit, result),
+      timeoutPromise
+    ]);
 }
 
 export async function findEmail(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void): Promise<string | null> {
