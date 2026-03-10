@@ -18,10 +18,13 @@ export type BlockLevel = 1 | 2 | 3;
 
 export class BlockDetectionError extends Error {
     level: BlockLevel;
-    constructor(level: BlockLevel, message: string) {
+    placeName?: string;
+    
+    constructor(level: BlockLevel, message: string, placeName?: string) {
         super(message);
         this.name = 'BlockDetectionError';
         this.level = level;
+        this.placeName = placeName;
     }
 }
 
@@ -44,13 +47,25 @@ export class GoogleMapsScraper {
     private maxPrice?: number;
     private whitelist: string[];
     private blacklist: string[];
+    private resumePlaceName?: string;
+    private isSecondAttempt: boolean;
 
-    constructor(page: Page, minPrice?: number, maxPrice?: number, whitelist: string[] = [], blacklist: string[] = []) {
+    constructor(
+        page: Page, 
+        minPrice?: number, 
+        maxPrice?: number, 
+        whitelist: string[] = [], 
+        blacklist: string[] = [],
+        resumePlaceName?: string,
+        isSecondAttempt: boolean = false
+    ) {
         this.page = page;
         this.minPrice = minPrice;
         this.maxPrice = maxPrice;
         this.whitelist = whitelist;
         this.blacklist = blacklist;
+        this.resumePlaceName = resumePlaceName;
+        this.isSecondAttempt = isSecondAttempt;
     }
 
     private matchesCategory(exactIndustry?: string): boolean {
@@ -348,6 +363,21 @@ export class GoogleMapsScraper {
                     const label = await card.getAttribute('aria-label');
                     if (!label || seen.has(label)) continue;
 
+                    // Skip clicking and processing until we reach the resumePlaceName
+                    if (this.resumePlaceName && label !== this.resumePlaceName) {
+                        logger.log(`[Maps] Fast-forwarding: Skipping [${label}] until reaching ${this.resumePlaceName}`);
+                        seen.add(label); // Mark as seen so we don't process it later
+                        await card.scrollIntoViewIfNeeded(); // Quickly scroll past to build the DOM
+                        processedOne = true;
+                        continue;
+                    }
+
+                    // Once found, we clear resumePlaceName to process this and subsequent items normally
+                    if (this.resumePlaceName === label) {
+                        logger.log(`[Maps] Reached resume target [${label}]. Resuming normal scraping.`);
+                        this.resumePlaceName = undefined;
+                    }
+
                     logger.log(`[Maps] [${label}] Processing list item...`);
                     
                     await card.scrollIntoViewIfNeeded();
@@ -357,7 +387,8 @@ export class GoogleMapsScraper {
                     logger.log(`[Maps] [${label}] Clicked item, waiting for panel...`);
                     await this.randomDelay(400, 900);
 
-                    // ── Level 2: Soft block – detail panel must show matching <h1> within 5 s ──
+                    // ── Level 2: Soft block – detail panel must show matching <h1> within 8s or 15s ──
+                    const timeoutMs = this.isSecondAttempt ? 15000 : 8000;
                     try {
                         await this.page.waitForFunction((expectedLabel: string) => {
                             const h1s = Array.from(document.querySelectorAll('h1'));
@@ -367,19 +398,16 @@ export class GoogleMapsScraper {
                                 const expected = expectedLabel.toLowerCase();
                                 return text.includes(expected) || expected.includes(text);
                             });
-                        }, label, { timeout: 8000 });
+                        }, label, { timeout: timeoutMs });
                         consecutiveTimeouts = 0; // panel loaded → reset counter
                         logger.log(`[Maps] [${label}] Detail panel loaded successfully`);
                     } catch {
                         // Log exactly what h1s are on the page to debug the issue
                         const h1Info = await this.page.$$eval('h1', els => els.map(e => e.textContent?.trim() || ''));
                         consecutiveTimeouts++;
-                        logger.warn(`[Maps] [${label}] Panel timeout #${consecutiveTimeouts} for "${label}". Found H1s: ${JSON.stringify(h1Info)}`);
-                        if (consecutiveTimeouts >= 3) {
-                            throw new BlockDetectionError(2,
-                                `Soft block: detail panel failed to load ${consecutiveTimeouts}× in a row`);
-                        }
-                        continue; // skip this card, try next
+                        logger.warn(`[Maps] [${label}] Panel timeout for "${label}". Found H1s: ${JSON.stringify(h1Info)}`);
+                        throw new BlockDetectionError(2,
+                            `Soft block: detail panel failed to load after ${timeoutMs}ms`, label);
                     }
 
                     // ── Level 1: Re-check after click (URL may have changed) ──────────

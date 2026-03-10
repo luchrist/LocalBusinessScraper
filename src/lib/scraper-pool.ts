@@ -70,9 +70,9 @@ export class ScraperWorker {
 
   /**
    * Reset after every search: closes current context + page, opens a fresh
-   * one (new cookies, localStorage, cache). Browser process stays alive.
+   * one (new cookies, localStorage, cache). Browser process stays alive unless forced or limit reached.
    */
-  async resetContext() {
+  async resetContext(forceRestart: boolean = false) {
     try { await this.page?.close(); } catch {}
     try { await this.context?.close(); } catch {}
     this.page = null;
@@ -80,9 +80,9 @@ export class ScraperWorker {
 
     this.searchCount++;
 
-    // Rotate the whole browser after N searches
-    if (this.searchCount >= BROWSER_ROTATE_EVERY) {
-      logger.log(`[Worker ${this.id}] Rotating browser after ${this.searchCount} searches`);
+    // Rotate the whole browser after N searches or if forced
+    if (forceRestart || this.searchCount >= BROWSER_ROTATE_EVERY) {
+      logger.log(`[Worker ${this.id}] Rotating browser (forced: ${forceRestart}, count: ${this.searchCount})`);
       await this._rotateBrowser();
     } else {
       await this._newContext();
