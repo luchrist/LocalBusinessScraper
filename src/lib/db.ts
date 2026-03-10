@@ -298,8 +298,20 @@ export function resetJobToPending(db: Database.Database, jobId: string) {
 }
 
 export function resetStaleJobs(db: Database.Database, sessionId: string) {
-  // Called on resume – jobs that were 'running' when we crashed go back to 'pending'
-  db.prepare(`UPDATE jobs SET status = 'pending', started_at = NULL WHERE session_id = ? AND status = 'running'`).run(sessionId);
+  // Called on resume – distinguish between:
+  //   (a) jobs that have places already in DB → scraping was done, mark as done
+  //   (b) jobs with no places at all → genuinely interrupted before first result, re-queue
+  db.prepare(`
+    UPDATE jobs SET status = 'done'
+    WHERE session_id = ? AND status = 'running'
+      AND id IN (SELECT DISTINCT job_id FROM places WHERE session_id = ?)
+  `).run(sessionId, sessionId);
+  db.prepare(`
+    UPDATE jobs SET status = 'pending', started_at = NULL
+    WHERE session_id = ? AND status = 'running'
+      AND id NOT IN (SELECT DISTINCT job_id FROM places WHERE session_id = ?)
+  `).run(sessionId, sessionId);
+  // Enrichment crash recovery: enriching → pending so workers pick them back up
   db.prepare(`UPDATE places SET enrich_status = 'pending' WHERE session_id = ? AND enrich_status = 'enriching'`).run(sessionId);
 }
 
@@ -445,6 +457,24 @@ export function countPlaces(db: Database.Database, sessionId: string): { total: 
 export function hasPendingPlaces(db: Database.Database, sessionId: string): boolean {
   const row = db.prepare(`
     SELECT 1 FROM places WHERE session_id = ? AND enrich_status IN ('pending','enriching') LIMIT 1
+  `).get(sessionId);
+  return !!row;
+}
+
+/**
+ * Returns true if there is still work for the enrichment pollers to do:
+ * - places still pending/enriching (need enrichment), OR
+ * - places in a terminal state but not yet streamed to the client.
+ *
+ * Use this as the poller exit condition instead of hasPendingPlaces so that
+ * no_website / skipped places are also flushed before the poller exits.
+ */
+export function hasUnfinishedWork(db: Database.Database, sessionId: string): boolean {
+  const row = db.prepare(`
+    SELECT 1 FROM places
+    WHERE session_id = ?
+      AND (enrich_status IN ('pending','enriching') OR streamed = 0)
+    LIMIT 1
   `).get(sessionId);
   return !!row;
 }

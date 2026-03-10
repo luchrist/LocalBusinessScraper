@@ -17,7 +17,7 @@ import { logger } from '@/lib/logger';
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import os from 'os';
 
-const BROWSER_ROTATE_EVERY = 2; // searches before full browser restart
+const BROWSER_ROTATE_EVERY = 1; // searches before full browser restart
 
 // ─── Stealth init script ──────────────────────────────────────────────────────
 
