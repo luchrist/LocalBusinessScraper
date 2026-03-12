@@ -1,4 +1,4 @@
-export const OWNER_LIST_SEPARATOR = '|';
+export const OWNER_LIST_SEPARATOR = ' & ';
 
 export interface ParsedOwnerName {
   fullName: string;
@@ -106,10 +106,30 @@ function joinList(values: string[]): string | null {
 
 export function normalizeOwnerNamesFromCandidates(candidates: string[]): OwnerNameNormalization {
   const uniqueCandidates = uniquePreserve(candidates);
-  const owners = uniqueCandidates.map(splitNameByRule);
+  const rawOwners = uniqueCandidates.map(splitNameByRule);
+
+  // Deduplicate by combination of first name and last name
+  const owners: ParsedOwnerName[] = [];
+  const seenNameCombos = new Set<string>();
+
+  for (const owner of rawOwners) {
+    const fn = owner.firstName.trim().toLowerCase();
+    const ln = owner.lastName.trim().toLowerCase();
+    // Only last name given or both given should be checked. 
+    // If somehow both are empty, combo is empty space.
+    const combo = `${fn} ${ln}`;
+    
+    if (seenNameCombos.has(combo)) {
+      continue;
+    }
+    seenNameCombos.add(combo);
+    owners.push(owner);
+  }
+
+  const finalDisplays = owners.map((o) => o.fullName);
 
   return {
-    ownerDisplay: uniqueCandidates.length > 0 ? uniqueCandidates.join(', ') : null,
+    ownerDisplay: finalDisplays.length > 0 ? finalDisplays.join(', ') : null,
     ownerSalutations: joinList(
       owners
         .map((owner) => owner.salutation)

@@ -19,7 +19,7 @@ function classifyOwner(
 ): { isAnredeNachname: boolean; isFirstnameNoAnrede: boolean } {
   const hasSalutation = !!(ownerSalutations?.trim());
   const hasLastName = !!(ownerLastNames?.trim());
-  const firstNames = (ownerFirstNames ?? '').split('|').map(s => s.trim()).filter(Boolean);
+  const firstNames = (ownerFirstNames ?? '').split('&').map(s => s.trim()).filter(Boolean);
   const hasAnyRealFirstName = firstNames.some(fn => !isInitialOnly(fn));
   const allFirstNamesAbsentOrInitial =
     firstNames.length === 0 || firstNames.every(fn => isInitialOnly(fn));
@@ -59,9 +59,9 @@ export async function GET(
 
     const csvData = places.map((p: any) => {
       const fallback = normalizeOwnerNameString(p.owner);
-      const ownerSalutations = p.owner_salutations ?? fallback.ownerSalutations;
-      const ownerFirstNames = p.owner_first_names ?? fallback.ownerFirstNames;
-      const ownerLastNames = p.owner_last_names ?? fallback.ownerLastNames;
+      const ownerSalutations = (p.owner_salutations ?? fallback.ownerSalutations)?.replace(/\|/g, ' & ');
+      const ownerFirstNames = (p.owner_first_names ?? fallback.ownerFirstNames)?.replace(/\|/g, ' & ');
+      const ownerLastNames = (p.owner_last_names ?? fallback.ownerLastNames)?.replace(/\|/g, ' & ');
 
       return {
       Stadt: p.stadt,
@@ -95,8 +95,17 @@ export async function GET(
         const row = csvData[i];
         const hasOwnerName = !!(row['Geschäftsführer Vorname']?.trim() || row['Geschäftsführer Nachname']?.trim());
         const hasEmail = !!p.email?.trim();
-        if (!hasOwnerName && hasEmail) ohneNameRows.push(row);
-        if (!hasEmail) ohneEmailRows.push(row);
+        
+        if (!hasEmail) {
+          ohneEmailRows.push(row);
+          continue;
+        }
+
+        if (!hasOwnerName) {
+          ohneNameRows.push(row);
+          continue;
+        }
+
         const { isAnredeNachname, isFirstnameNoAnrede } = classifyOwner(
           row['Anrede'],
           row['Geschäftsführer Vorname'],
