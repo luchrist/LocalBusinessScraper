@@ -4,24 +4,35 @@ import path from 'path';
 const LOG_DIR = path.join(process.cwd(), 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'scraper.log');
 
-// Ensure log directory exists
-if (!fs.existsSync(LOG_DIR)) {
-  fs.mkdirSync(LOG_DIR, { recursive: true });
+// Defer directory creation to first write operation
+let isLogDirCreated = false;
+function ensureLogDir() {
+  if (!isLogDirCreated) {
+    if (!fs.existsSync(LOG_DIR)) {
+      fs.mkdirSync(LOG_DIR, { recursive: true });
+    }
+    isLogDirCreated = true;
+  }
+}
+
+function formatArg(arg: any): string {
+  if (arg instanceof Error) {
+    return `${arg.name}: ${arg.message}\n${arg.stack}`;
+  }
+  return typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg);
 }
 
 function formatMessage(level: string, message: any, ...args: any[]) {
   const timestamp = new Date().toISOString();
-  const formattedArgs = args.map(arg => 
-    typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-  ).join(' ');
-  
-  const msgContent = typeof message === 'object' ? JSON.stringify(message, null, 2) : String(message);
+  const formattedArgs = args.map(formatArg).join(' ');
+  const msgContent = formatArg(message);
   
   return `[${timestamp}] [${level.toUpperCase()}] ${msgContent} ${formattedArgs}\n`;
 }
 
 function writeLog(level: string, message: any, ...args: any[]) {
   const logMessage = formatMessage(level, message, ...args);
+  ensureLogDir();
   try {
     // Synchronous append guarantees file order equals call order.
     fs.appendFileSync(LOG_FILE, logMessage);

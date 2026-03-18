@@ -7,6 +7,7 @@ import { normalizeOwnerNameString, normalizeOwnerNamesFromCandidates } from './o
 export const EMAIL_REGEX = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g;
 export const OBFUSCATED_EMAIL_REGEX = /([\w.+\-]+)\s*(?:@|\s*(?:\(?at\)?|\[at\]|\{at\}|\<at\>|at|AT|ät))\s*([A-Za-z0-9.\-]+)\.([A-Za-z]{2,})/gi;
 export const COMMON_PROVIDERS = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'web.de', 'gmx.de', 'gmx.net', 'aol.com', 'freenet.de', 'icloud.com', 't-online.de', 'live.com', 'protonmail.com', 'yandex.com'];
+export const BLOCKED_EMAIL_DOMAINS = new Set(['caritas.de', 'speisekarte.de', 'hunger.jetzt.de', 'website.de']);
 
 // Real TLDs ordered longest-first so matching is greedy (e.g. .co.uk wins over .co)
 const VALID_TLDS = [
@@ -190,7 +191,10 @@ export function normalizeDomain(domain: string): string {
 export function isEmailFromDomain(email: string, expectedDomain: string, strictMode: boolean = true): boolean {
   const emailDomain = email.split('@')[1]?.toLowerCase();
   if (!emailDomain) return false;
-  
+
+  // Blocked domains are never accepted
+  if (BLOCKED_EMAIL_DOMAINS.has(emailDomain)) return false;
+
   // Common providers always OK
   if (COMMON_PROVIDERS.includes(emailDomain)) return true;
   
@@ -250,9 +254,9 @@ export function extractEmailsFromText(text: string, domain: string, log: (msg: s
 }
 
 // Extracted logic for finding owner in text (shared by HTTP and Playwright)
-export async function extractOwnerFromText(text: string, businessInfo: { name?: string, industry?: string }, log: (msg: string) => void): Promise<string | null> {
+export async function extractOwnerFromText(text: string, businessInfo: { name?: string, industry?: string, city?: string }, log: (msg: string) => void): Promise<string | null> {
     // Try regex extraction first, including optional two-line disambiguation metadata.
-    const extraction = extractNamesDetailed(text, { takeFirst: false });
+  const extraction = extractNamesDetailed(text, { takeFirst: false, placeCity: businessInfo.city });
     let names = [...extraction.names];
 
     if (extraction.pendingDisambiguations.length > 0) {
@@ -293,12 +297,16 @@ export async function extractOwnerFromText(text: string, businessInfo: { name?: 
 
     if (names.length > 0) {
       const normalized = normalizeOwnerNamesFromCandidates(names);
-      log(`   👤 Owner found (regex): ${normalized.ownerDisplay}`);
-      return normalized.ownerDisplay;
+      if (normalized.ownerDisplay && normalized.owners.some(o => o.fullName.trim().length > 0)) {
+        log(`   👤 Owner found (regex): ${normalized.ownerDisplay}`);
+        return normalized.ownerDisplay;
+      }
+      log(`   ⚠️ Regex names filtered out after normalization, trying LLM...`);
+    } else {
+      log(`   🤖 No owner found with regex, trying LLM...`);
     }
     
-    // Fallback to LLM if regex found nothing
-    log(`   🤖 No owner found with regex, trying LLM...`);
+    // Fallback to LLM if regex found nothing or names were invalid after normalization
     try {
       const { extractOwnerWithLLM } = await import('./llm-extractor');
         const llmOwner = await extractOwnerWithLLM(text, businessInfo);
@@ -315,7 +323,7 @@ export async function extractOwnerFromText(text: string, businessInfo: { name?: 
 
 export async function extractOwnerDetailsFromText(
   text: string,
-  businessInfo: { name?: string, industry?: string },
+  businessInfo: { name?: string, industry?: string, city?: string },
   log: (msg: string) => void
 ): Promise<OwnerExtractionResult> {
   const owner = await extractOwnerFromText(text, businessInfo, log);
@@ -345,6 +353,7 @@ async function extractEmailFromPage(page: Page, domain: string, isMainPage: bool
         if (email && email.includes('@')) {
           const cleaned = cleanEmail(email);
           if (cleaned) {
+            if (BLOCKED_EMAIL_DOMAINS.has(cleaned.split('@')[1]?.toLowerCase() || '')) continue;
             if (isMainPage) {
               log(`   ✅ Mailto from main page accepted: ${cleaned}`);
               return cleaned;
@@ -367,7 +376,7 @@ async function extractEmailFromPage(page: Page, domain: string, isMainPage: bool
   return extractEmailsFromText(text, domain, log);
 }
 
-async function searchPageForOwner(page: Page, businessInfo: { name?: string, industry?: string }, log: (msg: string) => void): Promise<OwnerExtractionResult> {
+async function searchPageForOwner(page: Page, businessInfo: { name?: string, industry?: string, city?: string }, log: (msg: string) => void): Promise<OwnerExtractionResult> {
   try {
     // Prefer innerText to preserve structure/newlines, fallback to textContent
     let text = await page.evaluate(() => document.body.innerText).catch(() => null);
@@ -402,7 +411,7 @@ async function fetchPage(url: string, log: (msg: string) => void): Promise<strin
     }
 }
 
-async function tryHttpScrape(url: string, domain: string, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string }, log: (msg: string) => void): Promise<ScrapeResult> {
+async function tryHttpScrape(url: string, domain: string, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string, businessCity?: string }, log: (msg: string) => void): Promise<ScrapeResult> {
   const result: ScrapeResult = { email: null, owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
     try {
         log(`   ⚡ Trying HTTP GET first for ${url}...`);
@@ -455,7 +464,7 @@ async function tryHttpScrape(url: string, domain: string, options: { searchEmail
             const $ = cheerio.load(rawHtmlToScrapeForOwner);
             $('script, style, nav, header, footer').remove();
             const textToSearch = $('body').text().replace(/\s+/g, ' ');
-            const extracted = await extractNamesDetailed(textToSearch, { takeFirst: false });
+            const extracted = await extractNamesDetailed(textToSearch, { takeFirst: false, placeCity: options.businessCity });
             if (extracted && extracted.names.length > 0) {
                const normalized = normalizeOwnerNamesFromCandidates(extracted.names);
                if (normalized.ownerDisplay) {
@@ -477,17 +486,11 @@ async function tryHttpScrape(url: string, domain: string, options: { searchEmail
 
 
 // Playwright scraping with Jitter and Timeouts
-async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, domain: string, log: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string }, initialResult: ScrapeResult, deadlineTs?: number): Promise<ScrapeResult> {
-    const { searchEmail = true, searchOwner = true, country = 'de', businessName, industry } = options;
+async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, domain: string, log: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string, businessCity?: string }, initialResult: ScrapeResult): Promise<ScrapeResult> {
+  const { searchEmail = true, searchOwner = true, country = 'de', businessName, industry, businessCity } = options;
     const result: ScrapeResult = { ...initialResult };
     const logger = log;
     const imprintPattern = getImprintPattern(country);
-
-    const assertNotTimedOut = () => {
-      if (deadlineTs && Date.now() > deadlineTs) {
-        throw new Error('Timeout');
-      }
-    };
 
     if (isResultComplete(result, searchEmail, searchOwner)) {
         return result;
@@ -521,12 +524,11 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
           const canonicalUrl = canonicalizeForSubpageCheck(url);
           if (!canonicalUrl || visited.has(canonicalUrl)) return;
           visited.add(canonicalUrl);
-          assertNotTimedOut();
          
          try {
            logger(`   📲 Loading (Playwright): ${url}`);
            try {
-             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
            } catch (gotoErr: any) {
              if (gotoErr.message && gotoErr.message.toLowerCase().includes('timeout')) {
                logger(`   ⚠️ Timeout waiting for domcontentloaded on ${url}, attempting to extract from partial load...`);
@@ -534,11 +536,9 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
                throw gotoErr;
              }
            }
-           assertNotTimedOut();
            
            // Human-like interaction
            await humanLikeInteraction(page);
-           assertNotTimedOut();
            
            if (searchEmail && !result.email) {
                 result.email = await extractEmailFromPage(page, domain, isMainPage, logger);
@@ -548,7 +548,7 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
            
            if (shouldSearchOwner) {
                logger(`   🔍 Scanning for owner on impressum...`);
-               const ownerResult = await searchPageForOwner(page, { name: businessName, industry }, logger);
+               const ownerResult = await searchPageForOwner(page, { name: businessName, industry, city: businessCity }, logger);
                if (ownerResult.owner) {
                  result.owner = ownerResult.owner;
                  result.ownerSalutations = ownerResult.ownerSalutations;
@@ -563,7 +563,6 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
     };
     
     try {
-      assertNotTimedOut();
         let baseUrl: URL;
         try { baseUrl = new URL(websiteUrl); } catch { return result; }
 
@@ -575,7 +574,6 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
             return result;
         }
 
-        assertNotTimedOut();
         const rawLinks = await page.$$eval('a[href]', (anchors: HTMLAnchorElement[]) => 
             anchors.map(a => a.getAttribute('href') || '').filter(h => h.trim().length > 0)
         ).catch(() => []);
@@ -642,7 +640,7 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
 
         if (searchOwner && !result.owner && orderedPages.length === 0) {
           logger('   🎯 No subpages found, checking homepage owner as final fallback.');
-          const ownerResult = await searchPageForOwner(page, { name: businessName, industry }, logger);
+          const ownerResult = await searchPageForOwner(page, { name: businessName, industry, city: businessCity }, logger);
           if (ownerResult.owner) {
             result.owner = ownerResult.owner;
             result.ownerSalutations = ownerResult.ownerSalutations;
@@ -651,13 +649,14 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
           }
         }
 
+        let subpagesChecked = 0;
         for (const link of orderedPages) {
-            // Stop conditions:
           if (isResultComplete(result, searchEmail, searchOwner)) break;
-          assertNotTimedOut();
+          if (subpagesChecked >= 5) break;
 
-            // Owner extraction is intentionally limited to one target page.
-            await processPage(link, false, true);
+          // Owner extraction is intentionally limited to one target page.
+          await processPage(link, false, true);
+          subpagesChecked++;
         }
         
     } catch (e) {
@@ -668,12 +667,11 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
     return result;
 }
 
-export async function findContactInfo(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string } = {}): Promise<ScrapeResult> {
+export async function findContactInfo(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void, options: { searchEmail?: boolean; searchOwner?: boolean; country?: string, businessName?: string, industry?: string, businessCity?: string } = {}): Promise<ScrapeResult> {
   const { searchEmail = true, searchOwner = true, country = 'de' } = options;
   const logger = log || console.log;
   const result: ScrapeResult = { email: null, owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
   const retryLimit = 1;
-  const attemptTimeoutMs = 60000;
 
   logger(`🕷️  Starting scraping for: ${websiteUrl} (email: ${searchEmail}, owner: ${searchOwner}, country: ${country})`);
 
@@ -688,7 +686,6 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
   const domain = domainToUnicode(baseUrl.hostname).replace(/^www\./, '');
 
     const doScrape = async (seed: ScrapeResult): Promise<ScrapeResult> => {
-     const deadlineTs = Date.now() + attemptTimeoutMs;
      // 1. Try HTTP (Fast)
     const httpResult = await tryHttpScrape(websiteUrl, domain, options, logger);
     let partialResult = mergeScrapeResults(seed, httpResult);
@@ -727,7 +724,7 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
      }
 
      // 2. Fallback to Playwright
-     const playwrightResult = await tryPlaywrightScrape(context, websiteUrl, domain, logger, options, partialResult, deadlineTs);
+     const playwrightResult = await tryPlaywrightScrape(context, websiteUrl, domain, logger, options, partialResult);
      return mergeScrapeResults(partialResult, playwrightResult);
   };
 
@@ -751,19 +748,7 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
       }
   };
 
-    // Wrap the entire extraction chain in a hard timeout to prevent infinite hanging
-    const hardTimeoutMs = attemptTimeoutMs + 10000; // 10s buffer over internal deadline
-    const timeoutPromise = new Promise<ScrapeResult>((resolve) => {
-      setTimeout(() => {
-        logger(`   ⏳ Hard timeout reached (${hardTimeoutMs}ms). Returning partial result.`);
-        resolve(result);
-      }, hardTimeoutMs);
-    });
-
-    return Promise.race([
-      attemptScrape(retryLimit, result),
-      timeoutPromise
-    ]);
+    return attemptScrape(retryLimit, result);
 }
 
 export async function findEmail(context: BrowserContext, websiteUrl: string, log?: (msg: string) => void): Promise<string | null> {

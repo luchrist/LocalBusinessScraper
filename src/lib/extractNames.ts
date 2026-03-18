@@ -2,6 +2,7 @@
 export type ExtractOptions = {
   takeFirst?: boolean;        // wenn true: nur ersten Namen zurückgeben
   enableLooseLineScan?: boolean; // optional: zusätzliche vorsichtige Zeilen-Heuristik
+  placeCity?: string; // optionale Stadt aus dem Place-Kontext, wird als Name geblockt
 };
 
 export type PendingNameDisambiguation = {
@@ -28,8 +29,49 @@ const NON_NAME_TOKENS = new Set([
   "service", "sauberkeit", "freundlichkeit", "stimmung",
   // Sonstige häufige Substantive, die kein Namensbestandteil sind
   "öffnungszeiten", "adresse", "telefon", "webseite", "kontakt",
-  "speisekarte", "angebot", "produkt", "küche",
+  "speisekarte", "angebot", "produkt", "küche", "aufsichtsbehörde", "richtigkeit",
+  "konzeption", "design", "programmierung", "hosting", "domain", "beratung",
+  "catering", "haftung", "food", "drink", "e-mail", "email", "bankverbindung",
+  "vorarlberg", "voralberg", "realisierung", "trattoria",
+  // Rollen-/Organisationsbegriffe, die kein Namensbestandteil sind
+  "gf", "geschäftsführer", "geschaeftsfuehrer", "geschäftsführung", "geschaeftsfuehrung",
+  "inhaber", "inhaberin", "registergericht", "amtsgericht", "finanzamt",
+  "ristorante", "gasthaus", "landeshauptstadt",
 ]);
+
+const BLOCKED_NAME_PATTERNS: RegExp[] = [
+  /\bgasthof\w*\b/iu,
+  /\bgoogle\s+analytics\b/iu,
+  /\bumsatzsteuer\s*-?\s*ident\w*\b/iu,
+  /\bregistergericht\b/iu,
+  /\bamtsgericht\b/iu,
+  /\bfinanzamt\b/iu,
+  /\bgeschäftsführung\b/iu,
+  /\bgeschaeftsfuehrung\b/iu,
+  /\bgasthaus\b/iu,
+  /\bristorante\b/iu,
+  /\btrattoria\b/iu,
+  /\binhaber\b/iu,
+  /\bgf\b/iu,
+  /\bstadt\w*\b/iu,
+  /\baufsichtsbeh(?:o|ö)rde\b/iu,
+  /\brechtliche\s+hinweise\b/iu,
+  /\brichtigkeit\b/iu,
+  /\bkonzeption\b/iu,
+  /\bdesign\b/iu,
+  /\bprogrammierung\b/iu,
+  /\bhosting\b/iu,
+  /\bdomain\b/iu,
+  /\bberatung\b/iu,
+  /\bcatering\b/iu,
+  /\bhaftung(?:\s+f(?:u|ü)r\s+inhalte)?\b/iu,
+  /\bfood\b/iu,
+  /\bdrink\b/iu,
+  /\be[-\s]?mail\b/iu,
+  /\bbankverbindung\b/iu,
+  /\bvorarl?berg\b/iu,
+  /\brealisierung\b/iu,
+];
 
 const STOP_BY_DIGITS = /\d/; // Adressen etc. raus
 
@@ -37,10 +79,13 @@ const STOP_BY_DIGITS = /\d/; // Adressen etc. raus
 // - Entweder "Herr/Frau X" (auch 1 Nachname) oder
 // - "Vorname Nachname" (mind. 2 Wörter), jeweils mit Großbuchstaben-Anfang
 const PERSON_WITH_TITLE_RE =
-  /^(Herr|Frau)\s+[A-ZÄÖÜ][\p{L}'’\-]+(?:\s+[A-ZÄÖÜ][\p{L}'’\-]+){0,3}$/u;
+  /^(Herr|Frau|Herrn|Dr.|Herr Dr.|Frau Dr.)\s+[A-ZÄÖÜ][\p{L}'’\-]+(?:\s+[A-ZÄÖÜ][\p{L}'’\-]+){0,3}$/u;
 
 const PERSON_NO_TITLE_RE =
   /^[A-ZÄÖÜ][\p{L}'’\-]+(?:\s+[A-ZÄÖÜ][\p{L}'’\-]+){1,3}$/u;
+
+const PERSON_SINGLE_TOKEN_RE =
+  /^[A-ZÄÖÜ][\p{L}'’\-]{2,}$/u;
 
 // Namen aus "Daniel Marquardt (Geschäftsführer)" extrahieren
 const NAME_BEFORE_ROLE_PARENS_RE =
@@ -106,8 +151,8 @@ const CUE_BLOCK_REGEXES: CueBlockConfig[] = [
 
   // Geschäftsführer / Inhaber (explizite Label)
   {
-    label: 'Geschäftsführer/Inhaber',
-    regex: /(?:\bGeschäftsführ(?:er|ung|erin|erinnen)\b|\bInhaber(?:in|inn?en)?\b)\s*:?\s*([\s\S]{1,250}?)(?=\n\s*\n|\n\s*[A-Z][^:]{0,30}:|\n\s*\d|$)/gi,
+    label: 'Geschäftsführer/Inhaber/Betreiber',
+    regex: /(?:\bGeschäftsführ(?:er|ung|erin|erinnen)\b|\bInhaber(?:in|inn?en)?\b|\bBetreiber(?:in|innen)?\b)\s*:?\s*([\s\S]{1,250}?)(?=\n\s*\n|\n\s*[A-Z][^:]{0,30}:|\n\s*\d|$)/gi,
     supportsTwoLineDisambiguation: false,
   },
 
@@ -137,21 +182,82 @@ function containsNonNameToken(s: string): boolean {
   return s.toLowerCase().split(/\s+/).some(t => NON_NAME_TOKENS.has(t));
 }
 
-function isLikelyPersonName(s: string): boolean {
+function containsBlockedNamePattern(s: string): boolean {
+  return BLOCKED_NAME_PATTERNS.some(re => re.test(s));
+}
+
+function transliterateGermanChars(s: string): string {
+  return s
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss");
+}
+
+function normalizeForExactComparison(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function buildComparisonForms(s: string): string[] {
+  const base = normalizeForExactComparison(s);
+  if (!base) return [];
+
+  const asciiGerman = normalizeForExactComparison(transliterateGermanChars(base));
+  const noDiacritics = normalizeForExactComparison(
+    base.normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+  );
+
+  return Array.from(new Set([base, asciiGerman, noDiacritics].filter(Boolean)));
+}
+
+function containsBlockedExactName(
+  s: string,
+  blockedExactNames: Set<string>
+): boolean {
+  if (blockedExactNames.size === 0) return false;
+  const forms = buildComparisonForms(s);
+  if (forms.length === 0) return false;
+
+  for (const form of forms) {
+    if (blockedExactNames.has(form)) return true;
+    for (const blocked of blockedExactNames) {
+      const escaped = blocked.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`, "u");
+      if (re.test(form)) return true;
+    }
+  }
+  return false;
+}
+
+function isLikelyPersonName(s: string, blockedExactNames: Set<string> = new Set()): boolean {
   if (!s) return false;
   if (STOP_BY_DIGITS.test(s)) return false;
   if (looksLikeBusinessLine(s)) return false;
   if (/[/@]|https?:\/\//i.test(s)) return false;
   if (containsNonNameToken(s)) return false;
+  if (containsBlockedNamePattern(s)) return false;
+  if (containsBlockedExactName(s, blockedExactNames)) return false;
 
-  return PERSON_WITH_TITLE_RE.test(s) || PERSON_NO_TITLE_RE.test(s);
+  return PERSON_WITH_TITLE_RE.test(s) || PERSON_NO_TITLE_RE.test(s) || PERSON_SINGLE_TOKEN_RE.test(s);
 }
 
 function cleanCandidate(raw: string): string {
   // Klammer-Rollen raus: "(Geschäftsführer)" etc.
   let s = raw.replace(/\s*\([^)]*\)\s*/g, " ").trim();
+  // Führende/trailende Rollenlabels entfernen (z.B. "GF Markus", "Sandro Inhaber")
+  s = s
+    .replace(/^(?:gf|geschäftsführer(?:in)?|geschaeftsfuehrer(?:in)?|inhaber(?:in)?|geschäftsführung|geschaeftsfuehrung)\b[\s:;,\-–—]*/iu, "")
+    .replace(/[\s:;,\-–—]+(?:gf|geschäftsführer(?:in)?|geschaeftsfuehrer(?:in)?|inhaber(?:in)?|geschäftsführung|geschaeftsfuehrung)\b\.?$/iu, "")
+    .trim();
   // Satzzeichen am Rand weg
   s = s.replace(/^[\s:,\-–—]+/, "").replace(/[\s,.;:]+$/, "").trim();
+  // Einzelne Initialen als Namensbestandteil verwerfen (z.B. "M Mustermann" -> "Mustermann")
+  const parts = s.split(/\s+/).filter(Boolean);
+  const withoutSingleLetterParts = parts.filter(p => !/^[A-Za-zÄÖÜäöü]$/u.test(p.replace(/[.'’\-]/g, "")));
+  s = withoutSingleLetterParts.join(" ").trim();
   // Mehrfachspaces
   s = s.replace(/\s{2,}/g, " ").trim();
   return s;
@@ -169,9 +275,9 @@ function splitCandidates(block: string): string[] {
     }
   }
 
-  // Trennzeichen: Komma / Semikolon / " und " / Zeilenumbrüche
+  // Trennzeichen: Komma / Semikolon / " und " / & / Zeilenumbrüche
   return cutAtAddress
-    .split(/\s*(?:,|;|\bund\b|\n)\s*/i)
+    .split(/\s*(?:,|;|\bund\b|&|\n)\s*/i)
     .map(x => x.trim())
     .filter(Boolean);
 }
@@ -227,11 +333,17 @@ export function extractNamesDetailed(text: string, opts: ExtractOptions = {}): E
   const t = normalizeText(text);
   let names: string[] = [];
   const pendingDisambiguations: PendingNameDisambiguation[] = [];
+  const blockedExactNames = new Set<string>();
+  if (opts.placeCity) {
+    for (const cityForm of buildComparisonForms(opts.placeCity)) {
+      blockedExactNames.add(cityForm);
+    }
+  }
 
   // 1) High-precision: Namen vor Rollen-Klammern überall einsammeln
   for (const m of t.matchAll(NAME_BEFORE_ROLE_PARENS_RE)) {
     const cand = cleanCandidate(m[1] ?? "");
-    if (isLikelyPersonName(cand)) names.push(cand);
+    if (isLikelyPersonName(cand, blockedExactNames)) names.push(cand);
   }
 
   // 2) Cue-Blöcke: "Vertreten durch:", "§55", "§5 TMG", etc.
@@ -269,7 +381,7 @@ export function extractNamesDetailed(text: string, opts: ExtractOptions = {}): E
       if (cue.supportsTwoLineDisambiguation) {
         const pair = getTwoLineDisambiguationCandidates(scanBlock);
         if (pair) {
-          const valid = pair.filter(isLikelyPersonName);
+          const valid = pair.filter(candidate => isLikelyPersonName(candidate, blockedExactNames));
           if (valid.length === 2) {
             pendingDisambiguations.push({
               line1: valid[0],
@@ -285,7 +397,7 @@ export function extractNamesDetailed(text: string, opts: ExtractOptions = {}): E
           // (e.g. business name + person name on consecutive blank-separated paragraphs
           // as seen on Jimdo sites). Delegate to the LLM rather than returning both.
           const candidates = uniquePreserve(
-            splitCandidates(scanBlock).map(cleanCandidate).filter(isLikelyPersonName)
+            splitCandidates(scanBlock).map(cleanCandidate).filter(candidate => isLikelyPersonName(candidate, blockedExactNames))
           );
           if (candidates.length === 2) {
             pendingDisambiguations.push({
@@ -302,7 +414,7 @@ export function extractNamesDetailed(text: string, opts: ExtractOptions = {}): E
 
       for (const part of splitCandidates(scanBlock)) {
         const cand = cleanCandidate(part);
-        if (isLikelyPersonName(cand)) names.push(cand);
+        if (isLikelyPersonName(cand, blockedExactNames)) names.push(cand);
       }
     }
   }
@@ -312,7 +424,7 @@ export function extractNamesDetailed(text: string, opts: ExtractOptions = {}): E
     const lines = t.split("\n").map(l => l.trim()).filter(Boolean);
     for (const line of lines) {
       const cand = cleanCandidate(line);
-      if (isLikelyPersonName(cand)) names.push(cand);
+      if (isLikelyPersonName(cand, blockedExactNames)) names.push(cand);
     }
   }
 

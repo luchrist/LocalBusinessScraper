@@ -3,8 +3,12 @@ import path from 'path';
 import fs from 'fs';
 
 const DATA_DIR = path.join(process.cwd(), 'scraper-data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// Lazy initialize the data directory
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
 }
 
 const DB_PATH = path.join(DATA_DIR, 'settings.db');
@@ -16,6 +20,7 @@ export interface ApiKey {
 }
 
 function openDb() {
+  ensureDataDir();
   const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
   return db;

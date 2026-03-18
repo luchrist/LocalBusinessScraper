@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { getAllPlaces } from '@/lib/db';
-import { normalizeOwnerNameString } from '@/lib/owner-name-normalizer';
+import { normalizeOwnerNameString, sanitizeOwnerListField } from '@/lib/owner-name-normalizer';
 
 function isInitialOnly(name: string): boolean {
   // Matches a single letter (including umlauts) followed by a dot, e.g. "M."
@@ -59,9 +59,9 @@ export async function GET(
 
     const csvData = places.map((p: any) => {
       const fallback = normalizeOwnerNameString(p.owner);
-      const ownerSalutations = (p.owner_salutations ?? fallback.ownerSalutations)?.replace(/\|/g, ' & ');
-      const ownerFirstNames = (p.owner_first_names ?? fallback.ownerFirstNames)?.replace(/\|/g, ' & ');
-      const ownerLastNames = (p.owner_last_names ?? fallback.ownerLastNames)?.replace(/\|/g, ' & ');
+      const ownerSalutations = sanitizeOwnerListField(p.owner_salutations ?? fallback.ownerSalutations);
+      const ownerFirstNames = sanitizeOwnerListField(p.owner_first_names ?? fallback.ownerFirstNames);
+      const ownerLastNames = sanitizeOwnerListField(p.owner_last_names ?? fallback.ownerLastNames);
 
       return {
       Stadt: p.stadt,

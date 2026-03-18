@@ -1,5 +1,15 @@
 export const OWNER_LIST_SEPARATOR = ' & ';
 
+export function sanitizeOwnerListField(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const cleaned = value
+    .replace(/\|/g, ' & ')
+    .replace(/\s*&\s*/g, ' & ')
+    .replace(/^(?:\s*&\s*)+|(?:\s*&\s*)+$/g, '')
+    .trim();
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 export interface ParsedOwnerName {
   fullName: string;
   salutation: string | null;
@@ -38,24 +48,56 @@ function splitOwnerCandidates(ownerText: string): string[] {
     .filter(Boolean);
 }
 
+function isAllCaps(str: string): boolean {
+  const letters = str.replace(/[^a-zA-Z\u00C0-\u024F]/g, '');
+  return letters.length > 0 && letters === letters.toUpperCase();
+}
+
+function toTitleCase(str: string): string {
+  return str
+    .split(/(\s+|-)/g)
+    .map((part) => {
+      if (/^(\s+|-)$/.test(part)) return part;
+      return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+    })
+    .join('');
+}
+
+function normalizeNameCase(str: string): string {
+  return isAllCaps(str) ? toTitleCase(str) : str;
+}
+
 function splitNameByRule(fullName: string): ParsedOwnerName {
   let salutation: string | null = null;
-  let remainingName = fullName.replace(/\s+/g, ' ').trim();
+  let remainingName = normalizeNameCase(fullName.replace(/\s+/g, ' ').trim());
+  const normalizedFullName = remainingName;
 
   const lowerName = remainingName.toLowerCase();
-  if (lowerName.startsWith('herr ')) {
-    salutation = 'Herr';
-    remainingName = remainingName.substring(5).trim();
-  } else if (lowerName.startsWith('frau ')) {
-    salutation = 'Frau';
-    remainingName = remainingName.substring(5).trim();
+  
+  const salutations = [
+    { prefix: 'herr dr. ', value: 'Herr Dr.' },
+    { prefix: 'frau dr. ', value: 'Frau Dr.' },
+    { prefix: 'herr ', value: 'Herr' },
+    { prefix: 'herrn ', value: 'Herrn' },
+    { prefix: 'frau ', value: 'Frau' },
+    { prefix: 'dr. ', value: 'Dr.' },
+    { prefix: 'familie ', value: 'Familie' },
+    { prefix: 'fam. ', value: 'Fam.' },
+  ];
+
+  for (const { prefix, value } of salutations) {
+    if (lowerName.startsWith(prefix)) {
+      salutation = value;
+      remainingName = remainingName.substring(prefix.length).trim();
+      break;
+    }
   }
 
   const parts = remainingName.split(' ').filter(Boolean);
 
   if (parts.length <= 1) {
     return {
-      fullName,
+      fullName: normalizedFullName,
       salutation,
       firstName: '',
       lastName: parts[0] ?? '',
@@ -64,7 +106,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
 
   if (parts.length === 2) {
     return {
-      fullName,
+      fullName: normalizedFullName,
       salutation,
       firstName: parts[0],
       lastName: parts[1],
@@ -73,7 +115,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
 
   if (parts.length === 3) {
     return {
-      fullName,
+      fullName: normalizedFullName,
       salutation,
       firstName: `${parts[0]} ${parts[1]}`,
       lastName: parts[2],
@@ -82,7 +124,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
 
   if (parts.length === 4) {
     return {
-      fullName,
+      fullName: normalizedFullName,
       salutation,
       firstName: `${parts[0]} ${parts[1]}`,
       lastName: `${parts[2]} ${parts[3]}`,
@@ -91,7 +133,7 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
 
   const splitIndex = Math.ceil(parts.length / 2);
   return {
-    fullName,
+    fullName: normalizedFullName,
     salutation,
     firstName: parts.slice(0, splitIndex).join(' '),
     lastName: parts.slice(splitIndex).join(' '),
@@ -99,9 +141,9 @@ function splitNameByRule(fullName: string): ParsedOwnerName {
 }
 
 function joinList(values: string[]): string | null {
-  if (values.length === 0) return null;
-  if (!values.some((value) => value.trim().length > 0)) return null;
-  return values.join(OWNER_LIST_SEPARATOR);
+  const filtered = values.filter((v) => v.trim().length > 0);
+  if (filtered.length === 0) return null;
+  return filtered.join(OWNER_LIST_SEPARATOR);
 }
 
 export function normalizeOwnerNamesFromCandidates(candidates: string[]): OwnerNameNormalization {
@@ -126,7 +168,7 @@ export function normalizeOwnerNamesFromCandidates(candidates: string[]): OwnerNa
     owners.push(owner);
   }
 
-  const finalDisplays = owners.map((o) => o.fullName);
+  const finalDisplays = owners.map((o) => o.fullName).filter((d) => d.trim().length > 0);
 
   return {
     ownerDisplay: finalDisplays.length > 0 ? finalDisplays.join(', ') : null,

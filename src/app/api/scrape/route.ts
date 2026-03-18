@@ -7,6 +7,7 @@ import { chromium, BrowserContext, Browser } from 'playwright';
 import { findContactInfo } from '@/lib/email-scraper';
 import { GoogleMapsScraper, BlockDetectionError } from '@/lib/maps-scraper';
 import { ScraperPool } from '@/lib/scraper-pool';
+import { shutdownWorker } from '@/lib/llm-extractor';
 import { getNextAvailableKey, incrementApiKeyUsage, initSettingsDb } from '@/lib/settings-db';
 import {
   openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, hasUnfinishedWork, drainStreamable, isSessionCancelled,
@@ -53,13 +54,6 @@ interface Place {
 
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
-// Initialize settings DB
-try {
-  initSettingsDb();
-} catch (e) {
-  logger.error('Failed to initialize settings DB:', e);
-}
-
 // Helper to flexibly get column values
 function getColumnValue(row: any, keys: string[]): string | undefined {
   const rowKeys = Object.keys(row);
@@ -75,6 +69,13 @@ function getColumnValue(row: any, keys: string[]): string | undefined {
 }
 
 export async function POST(request: NextRequest) {
+  // Initialize settings DB once requested
+  try {
+    initSettingsDb();
+  } catch (e) {
+    logger.error('Failed to initialize settings DB:', e);
+  }
+
   logger.log('🚀 Scraping request started');
   
   if (!GOOGLE_PLACES_API_KEY) {
@@ -127,17 +128,16 @@ export async function POST(request: NextRequest) {
       const categoryBlacklistStr = formData.get('categoryBlacklist') as string || '';
       const categoryBlacklist = categoryBlacklistStr.split(',').map(s => s.trim()).filter(Boolean);
 
-      const checkCategory = (exactIndustry?: string): boolean => {
-        if (!exactIndustry) return true;
-        const industryLower = exactIndustry.toLowerCase();
-        if (categoryWhitelist.length > 0) {
-            return categoryWhitelist.some(term => industryLower.includes(term.toLowerCase()));
-        }
-        if (categoryBlacklist.length > 0) {
-            return !categoryBlacklist.some(term => industryLower.includes(term.toLowerCase()));
-        }
-        return true;
-      };
+  const checkCategory = (exactIndustryRaw?: any): boolean => {
+    if (!exactIndustryRaw) return true;
+    const exactIndustry = typeof exactIndustryRaw === 'string' ? exactIndustryRaw : exactIndustryRaw?.text || exactIndustryRaw?.toString();
+    if (typeof exactIndustry !== 'string') return true;
+    const industryLower = exactIndustry.toLowerCase();
+    const isWhitelisted = categoryWhitelist.some((term: string) => industryLower.includes(term.toLowerCase()));
+    const isBlacklisted = categoryBlacklist.some((term: string) => industryLower.includes(term.toLowerCase()));
+    if (isBlacklisted && !isWhitelisted) return false;
+    return true;
+  };
 
       const parsePriceAndMatch = (priceString?: string): boolean => {
         if (!priceString) return true;
@@ -357,7 +357,7 @@ export async function POST(request: NextRequest) {
               const siteContext = await createEnrichmentContext();
               try {
                 const info = await findContactInfo(siteContext, placeR.website, (msg) => logger.log(msg), {
-                  searchEmail, searchOwner, country, businessName: placeR.name, industry: placeR.branche,
+                  searchEmail, searchOwner, country, businessName: placeR.name, industry: placeR.branche, businessCity: placeR.stadt,
                 });
                 email = info.email;
                 owner = info.owner;
@@ -465,7 +465,13 @@ export async function POST(request: NextRequest) {
 
           if (isApi) {
             // ── API PATH ────────────────────────────────────────────────────────
-          const places = await searchPlaces(stadt, branche, effectiveMax, sendProgress);
+          const places = await searchPlaces(
+            stadt,
+            branche,
+            effectiveMax,
+            sendProgress,
+            () => isSessionCancelled(db, sessionId)
+          );
           logger.log(`✅ Found ${places.length} places for "${branche}" in "${stadt}"`);
 
           const jobMax = effectiveMax === Infinity ? null : effectiveMax;
@@ -743,6 +749,8 @@ export async function POST(request: NextRequest) {
         message: error instanceof Error ? error.message : 'Unknown error occurred',
       });
     } finally {
+      logger.log('🏁 Scrape route execution finished, cleaning up resources...');
+      await shutdownWorker(); // Destroy LLM worker to avoid memory leaks
       await writer.close();
     }
   })();
@@ -768,7 +776,13 @@ async function runWithLimit(tasks: (() => Promise<void>)[], limit: number) {
     await Promise.all(Array(limit).fill(0).map(worker));
 }
 
-async function searchPlaces(stadt: string, branche: string, maxBusinesses?: number, sendProgress?: (data: any) => Promise<void>): Promise<Place[]> {
+async function searchPlaces(
+  stadt: string,
+  branche: string,
+  maxBusinesses?: number,
+  sendProgress?: (data: any) => Promise<void>,
+  shouldAbort?: () => boolean,
+): Promise<Place[]> {
   const query = `${branche} in ${stadt}`;
   logger.log(`📍 Calling Google Places API with query: "${query}"`);
   
@@ -786,6 +800,11 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
   };
 
   do {
+    if (shouldAbort?.()) {
+      logger.log(`🛑 API search aborted for "${branche}" in "${stadt}" before next page request`);
+      break;
+    }
+
     // ─── Key Management logic added ───
     let apiKey: string | null = null;
     while (!apiKey) {
@@ -817,7 +836,7 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
-          'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours,places.rating,places.userRatingCount,places.priceLevel,nextPageToken',
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours,places.rating,places.userRatingCount,places.priceLevel,places.primaryTypeDisplayName,nextPageToken',
       },
       body: JSON.stringify(requestBody),
     });
@@ -849,7 +868,8 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
         rating: place.rating,
         reviews: place.userRatingCount,
           hours,
-          price: place.priceLevel ? priceLevelMap[place.priceLevel] : undefined
+          price: place.priceLevel ? priceLevelMap[place.priceLevel] : undefined,
+          exactIndustry: place.primaryTypeDisplayName?.text || undefined,
       };
     });
 
@@ -857,11 +877,16 @@ async function searchPlaces(stadt: string, branche: string, maxBusinesses?: numb
     pageToken = data.nextPageToken;
     pageNumber++;
 
+    if (shouldAbort?.()) {
+      logger.log(`🛑 API search aborted for "${branche}" in "${stadt}" after page ${pageNumber - 1}`);
+      break;
+    }
+
     // Small delay between requests to avoid rate limiting
     if (pageToken) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-  } while (pageToken && (!maxBusinesses || allPlaces.length < maxBusinesses));
+  } while (pageToken && (!maxBusinesses || allPlaces.length < maxBusinesses) && !shouldAbort?.());
 
   logger.log(`✅ Total places found across all pages: ${allPlaces.length}`);
   return allPlaces;

@@ -91,6 +91,17 @@ async function getWorker(): Promise<Worker | null> {
   return llmWorker;
 }
 
+export async function shutdownWorker(): Promise<void> {
+  if (llmWorker) {
+    logger.log("🛑 Terminating LLM Worker thread...");
+    await llmWorker.terminate();
+    llmWorker = null;
+    llmAvailable = true;
+    isInitializing = false;
+    initPromise = null;
+  }
+}
+
 export async function extractOwnerWithLLM(
   impressumText: string,
   businessInfo?: { name?: string, industry?: string },

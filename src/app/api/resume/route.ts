@@ -208,7 +208,7 @@ export async function GET(request: NextRequest) {
             try {
               const info = await findContactInfo(emailContext, place.website, (msg) => logger.log(msg), {
                 searchEmail, searchOwner, country,
-                businessName: place.name, industry: branche,
+                businessName: place.name, industry: branche, businessCity: place.stadt,
               });
               email = info.email;
               owner = info.owner;
@@ -297,6 +297,9 @@ export async function GET(request: NextRequest) {
       logger.error('[Resume] Error:', err);
       await send({ type: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
     } finally {
+      const { shutdownWorker } = await import('@/lib/llm-extractor');
+      logger.log('🏁 Resume route execution finished, cleaning up resources...');
+      await shutdownWorker(); // Destroy LLM worker to avoid memory leaks
       await writer.close();
     }
   })();

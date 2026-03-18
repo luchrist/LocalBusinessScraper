@@ -5,7 +5,7 @@ import React, { useState } from 'react';
 import { Upload, Download, Play, AlertCircle, CheckCircle, Loader, ChevronDown, ChevronRight, Filter } from 'lucide-react';
 import SettingsTab from '@/components/SettingsTab';
 import SplitterTab from '@/components/SplitterTab';
-import { normalizeOwnerNameString } from '@/lib/owner-name-normalizer';
+import { normalizeOwnerNameString, sanitizeOwnerListField } from '@/lib/owner-name-normalizer';
 
 interface BusinessResult {
   stadt: string;
@@ -48,7 +48,7 @@ const translations = {
     results: 'Ergebnisse',
     download: 'CSV Download',
     downloadAll: 'Alle (CSV)',
-    downloadSplit: 'Aufgeteilt (Excel)',
+    downloadSplit: 'Aufgeteilt',
     city: 'Stadt',
     industry: 'Branche',
     name: 'Name',
@@ -91,7 +91,7 @@ const translations = {
     results: 'Results',
     download: 'CSV Download',
     downloadAll: 'All (CSV)',
-    downloadSplit: 'Split (Excel)',
+    downloadSplit: 'Split',
     city: 'City',
     industry: 'Industry',
     name: 'Name',
@@ -440,9 +440,9 @@ export default function BusinessScraper() {
       ].join(','),
       ...results.map((r: BusinessResult) => {
         const fallback = normalizeOwnerNameString(r.owner);
-        const ownerSalutations = r.ownerSalutations ?? fallback.ownerSalutations ?? '';
-        const ownerFirstNames = r.ownerFirstNames ?? fallback.ownerFirstNames ?? '';
-        const ownerLastNames = r.ownerLastNames ?? fallback.ownerLastNames ?? '';
+         const ownerSalutations = sanitizeOwnerListField(r.ownerSalutations ?? fallback.ownerSalutations) ?? '';
+        const ownerFirstNames = sanitizeOwnerListField(r.ownerFirstNames ?? fallback.ownerFirstNames) ?? '';
+        const ownerLastNames = sanitizeOwnerListField(r.ownerLastNames ?? fallback.ownerLastNames) ?? '';
 
         return [
           r.stadt,

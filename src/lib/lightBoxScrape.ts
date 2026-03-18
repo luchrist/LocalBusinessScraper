@@ -31,6 +31,8 @@ const OWNER_LABELS = new Set([
   'geschaeftsfuehrer',
   'geschaftsfuhrerin',
   'geschaeftsfuhrerin',
+  'Geschäftsführer',
+  'Geschäftsführerin',
   'inhaber',
   'betreiber',
   'operator',

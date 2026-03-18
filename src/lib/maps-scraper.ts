@@ -72,21 +72,11 @@ export class GoogleMapsScraper {
         if (!exactIndustry) return true; // Keep if no category found, prevents dropping legitimate leads.
         const industryLower = exactIndustry.toLowerCase();
 
-        // Whitelist overrides blacklist
-        if (this.whitelist && this.whitelist.length > 0) {
-            const isWhitelisted = this.whitelist.some(term => industryLower.includes(term.toLowerCase()));
-            if (isWhitelisted) {
-                return true;
-            }
-            return false; // If whitelist is specified but doesn't match, reject and ignore blacklist
-        }
+        const isWhitelisted = this.whitelist.some(term => industryLower.includes(term.toLowerCase()));
+        const isBlacklisted = this.blacklist.some(term => industryLower.includes(term.toLowerCase()));
 
-        if (this.blacklist && this.blacklist.length > 0) {
-            const isBlacklisted = this.blacklist.some(term => industryLower.includes(term.toLowerCase()));
-            if (isBlacklisted) {
-                return false;
-            }
-        }
+        // Blacklist blocks by default; whitelist only overrides blacklist matches.
+        if (isBlacklisted && !isWhitelisted) return false;
 
         return true;
     }
@@ -402,8 +392,19 @@ export class GoogleMapsScraper {
                         consecutiveTimeouts = 0; // panel loaded → reset counter
                         logger.log(`[Maps] [${label}] Detail panel loaded successfully`);
                     } catch {
-                        // Log exactly what h1s are on the page to debug the issue
-                        const h1Info = await this.page.$$eval('h1', els => els.map(e => e.textContent?.trim() || ''));
+                        // Log exactly what h1s are on the page to debug the issue.
+                        // If the page/context got closed (cancel/disconnect), stop gracefully.
+                        let h1Info: string[] = [];
+                        try {
+                            h1Info = await this.page.$$eval('h1', els => els.map(e => e.textContent?.trim() || ''));
+                        } catch (err) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            if (/Target page, context or browser has been closed/i.test(msg)) {
+                                logger.log(`[Maps] [${label}] Page/context closed while waiting for panel. Stopping scrape loop.`);
+                                return;
+                            }
+                            throw err;
+                        }
                         consecutiveTimeouts++;
                         logger.warn(`[Maps] [${label}] Panel timeout for "${label}". Found H1s: ${JSON.stringify(h1Info)}`);
                         throw new BlockDetectionError(2,
@@ -429,6 +430,7 @@ export class GoogleMapsScraper {
                     await this.randomDelay(200, 400);
 
                     const details = await this.extractDetails(label);
+                    
                     if (details) {
                         // ── Level 3: Ghost block – count fully empty results ──────────
                         const isEmpty = !details.phone && !details.website &&
