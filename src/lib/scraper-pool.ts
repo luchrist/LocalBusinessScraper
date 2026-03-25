@@ -72,7 +72,7 @@ export class ScraperWorker {
    * Reset after every search: closes current context + page, opens a fresh
    * one (new cookies, localStorage, cache). Browser process stays alive unless forced or limit reached.
    */
-  async resetContext(forceRestart: boolean = false) {
+  async resetContext(forceRestart: boolean = false, headless?: boolean) {
     try { await this.page?.close(); } catch {}
     try { await this.context?.close(); } catch {}
     this.page = null;
@@ -83,18 +83,18 @@ export class ScraperWorker {
     // Rotate the whole browser after N searches or if forced
     if (forceRestart || this.searchCount >= BROWSER_ROTATE_EVERY) {
       logger.log(`[Worker ${this.id}] Rotating browser (forced: ${forceRestart}, count: ${this.searchCount})`);
-      await this._rotateBrowser();
+      await this._rotateBrowser(headless);
     } else {
       await this._newContext();
     }
   }
 
-  private async _rotateBrowser() {
+  private async _rotateBrowser(headless?: boolean) {
     try { await this.browser?.close(); } catch {}
     this.browser = null;
     this.searchCount = 0;
     this.browser = await chromium.launch({
-      headless: true, // false for demo
+      headless: headless !== undefined ? headless : true,
       args: [
         '--no-sandbox', '--disable-setuid-sandbox',
         '--disable-accelerated-2d-canvas', '--disable-infobars',

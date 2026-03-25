@@ -94,16 +94,18 @@ export async function GET(request: NextRequest) {
 
       const seenPlaceIds = new Set<string>();
       const seenDomains  = new Set<string>();
+      const scrapedNames = new Set<string>();
 
       // Pre-populate dedup sets from existing places so re-scraped jobs don't create duplicates
       const existingPlaces = db.prepare(
-        `SELECT place_key, website FROM places WHERE session_id = ?`
-      ).all(sessionId) as { place_key: string | null; website: string | null }[];
+        `SELECT place_key, website, name FROM places WHERE session_id = ?`
+      ).all(sessionId) as { place_key: string | null; website: string | null; name: string | null }[];
       for (const p of existingPlaces) {
         if (p.place_key) seenPlaceIds.add(p.place_key);
         if (p.website) {
           try { seenDomains.add(new URL(p.website).hostname.replace(/^www\./, '')); } catch {}
         }
+        if (p.name) scrapedNames.add(p.name);
       }
 
       // ── Send existing fully-enriched results to frontend immediately ──
@@ -151,7 +153,8 @@ export async function GET(request: NextRequest) {
               sessionMinPrice,
               sessionMaxPrice,
               sessionWhitelist,
-              sessionBlacklist
+              sessionBlacklist,
+              scrapedNames
             );
             await scraper.search(stadt, branche);
 

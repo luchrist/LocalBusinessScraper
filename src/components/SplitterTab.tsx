@@ -1,7 +1,5 @@
 import React, { useState } from 'react';
 import { Upload, Download, FileSpreadsheet, Loader, AlertCircle } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import JSZip from 'jszip';
 
 type Operator = '<' | '<=' | '==' | '>=' | '>' | '!=' | 'contains' | 'not contains';
 
@@ -18,6 +16,14 @@ export default function SplitterTab() {
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState('');
 
+  const loadSpreadsheetModules = async () => {
+    const [{ default: JSZip }, XLSX] = await Promise.all([
+      import('jszip'),
+      import('xlsx'),
+    ]);
+    return { JSZip, XLSX };
+  };
+
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -33,6 +39,8 @@ export default function SplitterTab() {
   const processFile = async (uploadedFile: File) => {
     setFile(uploadedFile);
     setError('');
+
+    const { XLSX } = await loadSpreadsheetModules();
     const reader = new FileReader();
 
     reader.onload = (e) => {
@@ -133,6 +141,8 @@ export default function SplitterTab() {
     setError('');
     
     try {
+      const { JSZip, XLSX } = await loadSpreadsheetModules();
+
       // Split the data
       const matchData: Record<string, unknown>[] = [];
       const noMatchData: Record<string, unknown>[] = [];

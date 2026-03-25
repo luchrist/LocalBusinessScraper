@@ -568,10 +568,14 @@ export async function POST(request: NextRequest) {
             let workerReleased = false;
             const worker = await pool.acquire();
 
+            // Fetch names already saved for this session to skip re-scraping them
+            const scrapedRows = db.prepare('SELECT name FROM places WHERE session_id = ?').all(sessionId) as { name: string }[];
+            const scrapedNames = new Set(scrapedRows.map(r => r.name));
+
             try {
               const scraper = new GoogleMapsScraper(
                   worker.page!, minPrice, maxPrice, categoryWhitelist, categoryBlacklist,
-                  retryPlaceName, isSecondAttempt
+                  scrapedNames
               );
               await scraper.search(stadt, branche);
 
@@ -642,10 +646,10 @@ export async function POST(request: NextRequest) {
               if (e instanceof BlockDetectionError) {
                 if (e.level === 2) {
                     if (!isSecondAttempt) {
-                        logger.warn(`[SoftBlock] First soft block detected at "${e.placeName}". Restarting browser and retrying...`);
+                        logger.warn(`[SoftBlock] Soft block detected ("${e.placeName}"). Restarting browser with headless=false and retrying...`);
                         retryPlaceName = e.placeName;
                         isSecondAttempt = true;
-                        try { await worker.resetContext(true); } catch {}
+                        try { await worker.resetContext(true, false); } catch {}
                         pool.release(worker);
                         workerReleased = true;
                         continue; // try again

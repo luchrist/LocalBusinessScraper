@@ -2,10 +2,12 @@
 'use client';
 
 import React, { useState } from 'react';
+import dynamic from 'next/dynamic';
 import { Upload, Download, Play, AlertCircle, CheckCircle, Loader, ChevronDown, ChevronRight, Filter } from 'lucide-react';
-import SettingsTab from '@/components/SettingsTab';
-import SplitterTab from '@/components/SplitterTab';
 import { normalizeOwnerNameString, sanitizeOwnerListField } from '@/lib/owner-name-normalizer';
+
+const SettingsTab = dynamic(() => import('@/components/SettingsTab'));
+const SplitterTab = dynamic(() => import('@/components/SplitterTab'));
 
 interface BusinessResult {
   stadt: string;

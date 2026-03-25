@@ -47,8 +47,7 @@ export class GoogleMapsScraper {
     private maxPrice?: number;
     private whitelist: string[];
     private blacklist: string[];
-    private resumePlaceName?: string;
-    private isSecondAttempt: boolean;
+    private scrapedNames: Set<string>;
 
     constructor(
         page: Page, 
@@ -56,16 +55,14 @@ export class GoogleMapsScraper {
         maxPrice?: number, 
         whitelist: string[] = [], 
         blacklist: string[] = [],
-        resumePlaceName?: string,
-        isSecondAttempt: boolean = false
+        scrapedNames: Set<string> = new Set()
     ) {
         this.page = page;
         this.minPrice = minPrice;
         this.maxPrice = maxPrice;
         this.whitelist = whitelist;
         this.blacklist = blacklist;
-        this.resumePlaceName = resumePlaceName;
-        this.isSecondAttempt = isSecondAttempt;
+        this.scrapedNames = scrapedNames;
     }
 
     private matchesCategory(exactIndustry?: string): boolean {
@@ -179,17 +176,21 @@ export class GoogleMapsScraper {
         } catch { /* element may have been detached */ }
     }
 
-    // Scroll feed in small irregular steps instead of jumping to the bottom at once
-    private async smoothScroll(feedSelector: string) {
+    // Scroll feed in small irregular steps; forceBottom=true makes the last step jump to scrollHeight
+    private async smoothScroll(feedSelector: string, forceBottom: boolean = false) {
         const steps = 3 + Math.floor(Math.random() * 3); // 3–5 steps
         for (let i = 0; i < steps; i++) {
-            await this.page.evaluate((sel) => {
+            const isLast = i === steps - 1;
+            await this.page.evaluate(({ sel, last, force }: { sel: string; last: boolean; force: boolean }) => {
                 const feed = document.querySelector(sel);
                 if (feed) {
-                    // Each step scrolls a random small amount
-                    feed.scrollTop += 180 + Math.random() * 220;
+                    if (last && force) {
+                        feed.scrollTop = (feed as HTMLElement).scrollHeight;
+                    } else {
+                        feed.scrollTop += 180 + Math.random() * 220;
+                    }
                 }
-            }, feedSelector);
+            }, { sel: feedSelector, last: isLast, force: forceBottom });
             await this.randomDelay(100, 300);
         }
     }
@@ -334,7 +335,7 @@ export class GoogleMapsScraper {
         let noNew = 0;
 
         // Block detection counters
-        let consecutiveTimeouts = 0; // Level 2 – Soft block
+        let failedConsecutively = 0; // Level 2 – Soft block (requires 2 consecutive failures)
         let consecutiveEmpty    = 0; // Level 3 – Ghost block
 
         while (true) {
@@ -353,62 +354,63 @@ export class GoogleMapsScraper {
                     const label = await card.getAttribute('aria-label');
                     if (!label || seen.has(label)) continue;
 
-                    // Skip clicking and processing until we reach the resumePlaceName
-                    if (this.resumePlaceName && label !== this.resumePlaceName) {
-                        logger.log(`[Maps] Fast-forwarding: Skipping [${label}] until reaching ${this.resumePlaceName}`);
-                        seen.add(label); // Mark as seen so we don't process it later
-                        await card.scrollIntoViewIfNeeded(); // Quickly scroll past to build the DOM
+                    // Already in DB from a previous run – scroll past quickly and continue
+                    if (this.scrapedNames.has(label)) {
+                        logger.log(`[Maps] Fast-forwarding: Skipping [${label}] (already in DB)`);
+                        seen.add(label);
+                        await card.scrollIntoViewIfNeeded();
                         processedOne = true;
                         continue;
                     }
 
-                    // Once found, we clear resumePlaceName to process this and subsequent items normally
-                    if (this.resumePlaceName === label) {
-                        logger.log(`[Maps] Reached resume target [${label}]. Resuming normal scraping.`);
-                        this.resumePlaceName = undefined;
-                    }
-
                     logger.log(`[Maps] [${label}] Processing list item...`);
-                    
-                    await card.scrollIntoViewIfNeeded();
-                    await this.randomDelay(150, 400);
-                    await this.humanMove(card);
-                    await card.click();
-                    logger.log(`[Maps] [${label}] Clicked item, waiting for panel...`);
-                    await this.randomDelay(400, 900);
 
-                    // ── Level 2: Soft block – detail panel must show matching <h1> within 8s or 15s ──
-                    const timeoutMs = this.isSecondAttempt ? 15000 : 8000;
-                    try {
-                        await this.page.waitForFunction((expectedLabel: string) => {
-                            const h1s = Array.from(document.querySelectorAll('h1'));
-                            return h1s.some(h1 => {
-                                if (!h1 || !h1.textContent) return false;
-                                const text = h1.textContent.trim().toLowerCase();
-                                const expected = expectedLabel.toLowerCase();
-                                return text.includes(expected) || expected.includes(text);
-                            });
-                        }, label, { timeout: timeoutMs });
-                        consecutiveTimeouts = 0; // panel loaded → reset counter
-                        logger.log(`[Maps] [${label}] Detail panel loaded successfully`);
-                    } catch {
-                        // Log exactly what h1s are on the page to debug the issue.
-                        // If the page/context got closed (cancel/disconnect), stop gracefully.
-                        let h1Info: string[] = [];
+                    // ── Level 2: Up to 2 click attempts; skip item on both failing, ─────────
+                    // ── throw BlockDetectionError only when 2 items fail consecutively ───────
+                    let panelLoaded = false;
+                    for (let attempt = 0; attempt < 2; attempt++) {
+                        await card.scrollIntoViewIfNeeded();
+                        await this.randomDelay(150, 400);
+                        await this.humanMove(card);
+                        await card.click();
+                        logger.log(`[Maps] [${label}] Clicked (attempt ${attempt + 1}), waiting for panel...`);
+                        await this.randomDelay(400, 900);
+
                         try {
-                            h1Info = await this.page.$$eval('h1', els => els.map(e => e.textContent?.trim() || ''));
+                            await this.page.waitForFunction((expectedLabel: string) => {
+                                const h1s = Array.from(document.querySelectorAll('h1'));
+                                return h1s.some(h1 => {
+                                    if (!h1 || !h1.textContent) return false;
+                                    const text = h1.textContent.trim().toLowerCase();
+                                    const expected = expectedLabel.toLowerCase();
+                                    return text.includes(expected) || expected.includes(text);
+                                });
+                            }, label, { timeout: 8000 });
+                            panelLoaded = true;
+                            failedConsecutively = 0;
+                            logger.log(`[Maps] [${label}] Detail panel loaded successfully`);
+                            break;
                         } catch (err) {
                             const msg = err instanceof Error ? err.message : String(err);
                             if (/Target page, context or browser has been closed/i.test(msg)) {
-                                logger.log(`[Maps] [${label}] Page/context closed while waiting for panel. Stopping scrape loop.`);
+                                logger.log(`[Maps] [${label}] Page/context closed. Stopping scrape loop.`);
                                 return;
                             }
-                            throw err;
+                            logger.warn(`[Maps] [${label}] Panel timeout (attempt ${attempt + 1})`);
                         }
-                        consecutiveTimeouts++;
-                        logger.warn(`[Maps] [${label}] Panel timeout for "${label}". Found H1s: ${JSON.stringify(h1Info)}`);
-                        throw new BlockDetectionError(2,
-                            `Soft block: detail panel failed to load after ${timeoutMs}ms`, label);
+                    }
+
+                    if (!panelLoaded) {
+                        failedConsecutively++;
+                        logger.warn(`[Maps] Skipping unresponsive place: "${label}" (consecutive failures: ${failedConsecutively})`);
+                        if (failedConsecutively >= 2) {
+                            throw new BlockDetectionError(2,
+                                `Soft block: ${failedConsecutively} consecutive items failed to open panel`, label);
+                        }
+                        // Single failure – skip this item and try the next one
+                        seen.add(label);
+                        processedOne = true;
+                        continue;
                     }
 
                     // ── Level 1: Re-check after click (URL may have changed) ──────────
@@ -498,8 +500,11 @@ export class GoogleMapsScraper {
                 if (noNew > 4) { logger.log('[Maps] No new results, stopping'); break; }
 
                 try { await this.page.hover(feedSel); } catch {}
-                await this.smoothScroll(feedSel);
-                await this.randomDelay(700, 1400);
+                // When noNew > 0 we need to trigger the lazy-loader, so force a scroll to bottom
+                await this.smoothScroll(feedSel, noNew > 0);
+                // Give Maps time to fetch and render fresh list items after hitting the bottom
+                if (noNew > 0) await this.randomDelay(1500, 2500);
+                else await this.randomDelay(700, 1400);
             }
         }
         logger.log(`[Maps] Done – ${seen.size} places found`);
