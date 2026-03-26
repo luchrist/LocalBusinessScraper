@@ -82,7 +82,7 @@ export interface ClaimedPlaceRow extends PlaceRow {
 const dbCache = new Map<string, Database.Database>();
 
 function dataDir(): string {
-  const dir = path.join(process.cwd(), 'scraper-data');
+  const dir = process.env.ELECTRON_DATA_DIR ?? path.join(process.cwd(), 'scraper-data');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -482,7 +482,7 @@ export function hasUnfinishedWork(db: Database.Database, sessionId: string): boo
 // ─── Session list (for resume UI) ────────────────────────────────────────────
 
 export function listSessions(): { id: string; path: string; created_at: number; status: string; total_jobs: number; worker_count: number }[] {
-  const dir = path.join(process.cwd(), 'scraper-data');
+  const dir = process.env.ELECTRON_DATA_DIR ?? path.join(process.cwd(), 'scraper-data');
   if (!fs.existsSync(dir)) return [];
 
   return fs.readdirSync(dir)

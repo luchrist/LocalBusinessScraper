@@ -31,7 +31,7 @@ type Language = 'de' | 'en';
 
 const translations = {
   de: {
-    title: 'Local Business Scraper',
+    title: 'Autosetter',
     subtitle: 'Scrape Tausende lokale Unternehmen nach Stadt und Branche.',
     uploadLabel: 'Excel- oder CSV-Datei hochladen mit den Spalten "Stadt" und "Branche" (optionale Spalte "Max" überschreibt die maximale Anzahl pro Zeile):',
     uploadPlaceholder: 'Zum Hochladen klicken oder Datei hier ablegen',
@@ -74,7 +74,7 @@ const translations = {
     of: 'von',
   },
   en: {
-    title: 'Local Business Scraper',
+    title: 'Autosetter',
     subtitle: 'Scrape thousands of local businesses by city and industry.',
     uploadLabel: 'Upload Excel or CSV File with the columns "city" and "industry" (optional column "max" overrides the maximum per row):',
     uploadPlaceholder: 'Click to upload or drag file here',
@@ -474,89 +474,74 @@ export default function BusinessScraper() {
   };
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-blue-50 to-indigo-100 p-8">
-      <div className="w-full max-w-[95%] mx-auto">
-        <div className="bg-white rounded-2xl shadow-xl p-8">
-          <div className="flex justify-between items-start mb-2">
-            <h1 className="text-3xl font-bold text-gray-800">{t.title}</h1>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setLanguage('de')}
-                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                  language === 'de' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                DE
-              </button>
-              <button
-                onClick={() => setLanguage('en')}
-                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                  language === 'en' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                EN
-              </button>
-            </div>
-          </div>
-          <p className="text-gray-600 mb-8">
-            {t.subtitle}
-          </p>
+    <div className="min-h-screen bg-gray-50">
+      {/* Content */}
+      <div className="min-h-screen p-5">
+        <div className="w-full max-w-[96%] mx-auto">
+          {/* Card */}
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-7">
 
-          <div className="flex border-b border-gray-200 mb-8">
-            <button
-              onClick={() => setActiveTab('scraper')}
-              className={`py-2 px-4 font-medium text-sm transition-colors relative ${
-                activeTab === 'scraper' 
-                  ? 'text-indigo-600 border-b-2 border-indigo-600' 
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              Scraper
-            </button>
-            <button
-              onClick={() => setActiveTab('history')}
-              className={`py-2 px-4 font-medium text-sm transition-colors relative ${
-                activeTab === 'history' 
-                  ? 'text-indigo-600 border-b-2 border-indigo-600' 
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              History
-            </button>
-            <button
-              onClick={() => setActiveTab('splitter')}
-              className={`py-2 px-4 font-medium text-sm transition-colors relative ${
-                activeTab === 'splitter' 
-                  ? 'text-indigo-600 border-b-2 border-indigo-600' 
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              Splitter
-            </button>
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`py-2 px-4 font-medium text-sm transition-colors relative ${
-                activeTab === 'settings' 
-                  ? 'text-indigo-600 border-b-2 border-indigo-600' 
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {t.settings}
-            </button>
-          </div>
+            {/* Header */}
+            <div className="flex justify-between items-center mb-1">
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Autosetter</h1>
+                <p className="text-xs text-gray-500 mt-0.5 tracking-widest uppercase">{t.subtitle}</p>
+              </div>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setLanguage('de')}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                    language === 'de'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-200 text-gray-500 hover:bg-gray-100'
+                  }`}
+                >
+                  DE
+                </button>
+                <button
+                  onClick={() => setLanguage('en')}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                    language === 'en'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  EN
+                </button>
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex border-b border-gray-200 mb-6 mt-5 gap-0">
+              {(['scraper', 'history', 'splitter', 'settings'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`py-2.5 px-5 text-sm font-medium transition-colors capitalize ${
+                    activeTab === tab
+                      ? 'text-indigo-600 border-b-2 border-indigo-600 -mb-px'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  {tab === 'settings' ? t.settings : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                </button>
+              ))}
+            </div>
 
           {activeTab === 'scraper' && (
             <>
           {/* Upload Section */}
-          <div className="mb-8">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+          <div className="mb-5">
+            <label className="block text-xs font-medium text-gray-500 mb-2 uppercase tracking-wider">
               {t.uploadLabel}
             </label>
-            <div 
-              className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
-                isDragging 
-                  ? 'border-indigo-500 bg-indigo-50' 
-                  : 'border-gray-300 hover:border-indigo-500'
+            <div
+              className={`border-2 border-dashed rounded-xl p-7 text-center transition-all cursor-pointer ${
+                isDragging
+                  ? 'border-indigo-500 bg-indigo-50'
+                  : file
+                  ? 'border-indigo-500/40 bg-indigo-50'
+                  : 'border-gray-300 hover:border-indigo-500/50 hover:bg-gray-50'
               }`}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -570,68 +555,61 @@ export default function BusinessScraper() {
                 id="file-upload"
               />
               <label htmlFor="file-upload" className="cursor-pointer">
-                <Upload className="mx-auto h-12 w-12 text-gray-400 mb-2" />
-                <p className="text-sm text-gray-600">
+                <Upload className={`mx-auto h-9 w-9 mb-2 ${file ? 'text-indigo-500' : 'text-gray-400'}`} />
+                <p className={`text-sm ${file ? 'text-indigo-600 font-medium' : 'text-gray-600'}`}>
                   {file ? file.name : t.uploadPlaceholder}
                 </p>
-                <p className="text-xs text-gray-500 mt-1">XLSX, XLS or CSV</p>
+                {!file && <p className="text-xs text-gray-400 mt-1">XLSX, XLS oder CSV</p>}
               </label>
             </div>
           </div>
 
-
           {/* Settings Section */}
-          <div className="mb-8 p-6 bg-gray-50 rounded-lg border border-gray-200">
-            <h3 className="text-lg font-semibold text-gray-800 mb-4">{t.settings}</h3>
-            
+          <div className="mb-5 p-5 bg-gray-50 rounded-xl border border-gray-200">
+            <h3 className="text-xs font-semibold text-gray-800 uppercase tracking-widest mb-4">{t.settings}</h3>
+
             <div className="space-y-4">
               {/* Email Toggle */}
               <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-gray-700">{t.searchEmail}</label>
+                <label className="text-sm text-gray-700">{t.searchEmail}</label>
                 <button
                   onClick={() => setSearchEmail(!searchEmail)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  className={`relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${
                     searchEmail ? 'bg-indigo-600' : 'bg-gray-300'
                   }`}
                 >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      searchEmail ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    searchEmail ? 'translate-x-5' : 'translate-x-0.5'
+                  }`} />
                 </button>
               </div>
 
               {/* Owner Toggle */}
               <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-gray-700">{t.searchOwner}</label>
+                <label className="text-sm text-gray-700">{t.searchOwner}</label>
                 <button
                   onClick={() => setSearchOwner(!searchOwner)}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  className={`relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${
                     searchOwner ? 'bg-indigo-600' : 'bg-gray-300'
                   }`}
                 >
-                  <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                      searchOwner ? 'translate-x-6' : 'translate-x-1'
-                    }`}
-                  />
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    searchOwner ? 'translate-x-5' : 'translate-x-0.5'
+                  }`} />
                 </button>
               </div>
 
-              {/* Country Selection - Only visible when searching for owners */}
+              {/* Country */}
               {searchOwner && (
                 <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-gray-700">{t.country}</label>
+                  <label className="text-sm text-gray-700">{t.country}</label>
                   <select
                     value={country}
                     onChange={(e) => setCountry(e.target.value)}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="px-3 py-1.5 rounded-lg text-sm border"
                   >
                     {countries.map((c) => (
-                      <option key={c.code} value={c.code}>
-                        {c.name}
-                      </option>
+                      <option key={c.code} value={c.code}>{c.name}</option>
                     ))}
                   </select>
                 </div>
@@ -639,7 +617,7 @@ export default function BusinessScraper() {
 
               {/* Max Businesses */}
               <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-gray-700">{t.maxBusinesses}</label>
+                <label className="text-sm text-gray-700">{t.maxBusinesses}</label>
                 <div className="flex gap-2">
                   <input
                     type="number"
@@ -648,24 +626,17 @@ export default function BusinessScraper() {
                     value={maxBusinesses === 'max' ? '' : maxBusinesses}
                     onChange={(e) => {
                       const value = e.target.value;
-                      if (value === '') {
-                        setMaxBusinesses('');
-                      } else {
-                        setMaxBusinesses(parseInt(value) || '');
-                      }
+                      if (value === '') { setMaxBusinesses(''); }
+                      else { setMaxBusinesses(parseInt(value) || ''); }
                     }}
-                    className={`w-24 px-3 py-2 border rounded-lg text-sm transition-colors ${
-                      maxBusinesses === 'max' 
-                        ? 'border-indigo-300 bg-indigo-50 text-indigo-700 font-medium placeholder-indigo-400' 
-                        : 'border-gray-300'
-                    }`}
-                    placeholder={maxBusinesses === 'max' ? 'Max' : "20, 60..."}
+                    className="w-20 px-3 py-1.5 rounded-lg text-sm border"
+                    placeholder={maxBusinesses === 'max' ? 'Max' : '20, 60...'}
                   />
                   <button
                     onClick={() => setMaxBusinesses(maxBusinesses === 'max' ? 60 : 'max')}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                       maxBusinesses === 'max'
-                        ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                        ? 'bg-indigo-600 text-white'
                         : 'bg-gray-300 text-gray-700 hover:bg-gray-400'
                     }`}
                   >
@@ -674,74 +645,54 @@ export default function BusinessScraper() {
                 </div>
               </div>
 
-              {/* Price Filter Collapsible */}
-              <div className="border border-gray-200 rounded-lg overflow-hidden">
+              {/* Filter Collapsible */}
+              <div className="border border-gray-200 rounded-xl overflow-hidden">
                 <button
                   type="button"
                   onClick={() => setIsFiltersOpen(!isFiltersOpen)}
                   className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
                 >
-                  <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                  <div className="flex items-center gap-2 text-sm text-gray-700">
                     <Filter className="w-4 h-4" />
                     <span>Filter</span>
                     {(minPrice !== '' || maxPrice !== '' || categoryWhitelist !== '' || categoryBlacklist !== '') && (
-                      <span className="w-2 h-2 rounded-full bg-blue-500 ml-1"></span>
+                      <span className="w-2 h-2 rounded-full bg-indigo-500" />
                     )}
                   </div>
-                  {isFiltersOpen ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+                  {isFiltersOpen
+                    ? <ChevronDown className="w-4 h-4 text-gray-400" />
+                    : <ChevronRight className="w-4 h-4 text-gray-400" />}
                 </button>
-                
+
                 {isFiltersOpen && (
-                  <div className="p-4 space-y-4 bg-white border-t border-gray-200">
+                  <div className="p-4 space-y-4 border-t border-gray-200">
                     <div className="flex items-center justify-between">
-                      <label className="text-sm font-medium text-gray-700">{t.minPrice}</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={minPrice}
+                      <label className="text-sm text-gray-700">{t.minPrice}</label>
+                      <input type="number" min="0" step="1" value={minPrice}
                         onChange={(e) => setMinPrice(e.target.value === '' ? '' : parseInt(e.target.value))}
-                        className="w-24 px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="z.B. 10"
-                      />
+                        className="w-24 px-3 py-1.5 rounded-lg text-sm border" placeholder="z.B. 10" />
                     </div>
                     <div className="flex items-center justify-between">
-                      <label className="text-sm font-medium text-gray-700">{t.maxPrice}</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={maxPrice}
+                      <label className="text-sm text-gray-700">{t.maxPrice}</label>
+                      <input type="number" min="0" step="1" value={maxPrice}
                         onChange={(e) => setMaxPrice(e.target.value === '' ? '' : parseInt(e.target.value))}
-                        className="w-24 px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="z.B. 50"
-                      />
+                        className="w-24 px-3 py-1.5 rounded-lg text-sm border" placeholder="z.B. 50" />
                     </div>
                     <div className="pt-2 border-t border-gray-100">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Kategorien Whitelist (kommagetrennt)
-                      </label>
-                      <textarea
-                        value={categoryWhitelist}
+                      <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider">Kategorien Whitelist</label>
+                      <textarea value={categoryWhitelist}
                         onChange={(e) => setCategoryWhitelist(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="z.B. Webdesign-Agentur, Marketingberater"
-                        rows={2}
-                      />
-                      <p className="mt-1 text-xs text-gray-500">Wenn nicht leer, werden NUR diese Kategorien zugelassen.</p>
+                        className="w-full px-3 py-2 rounded-lg text-sm border"
+                        placeholder="z.B. Webdesign-Agentur, Marketingberater" rows={2} />
+                      <p className="mt-1 text-xs text-gray-400">Nur diese Kategorien zulassen.</p>
                     </div>
                     <div className="pt-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Kategorien Blacklist (kommagetrennt)
-                      </label>
-                      <textarea
-                        value={categoryBlacklist}
+                      <label className="block text-xs text-gray-500 mb-1.5 uppercase tracking-wider">Kategorien Blacklist</label>
+                      <textarea value={categoryBlacklist}
                         onChange={(e) => setCategoryBlacklist(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg text-sm border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="z.B. Imbiss, Zahnarzt"
-                        rows={2}
-                      />
-                      <p className="mt-1 text-xs text-gray-500">Wenn enthalten, werden diese Kategorien ignoriert (z.B. "imbiss" blockiert auch "Kebabimbiss").</p>
+                        className="w-full px-3 py-2 rounded-lg text-sm border"
+                        placeholder="z.B. Imbiss, Zahnarzt" rows={2} />
+                      <p className="mt-1 text-xs text-gray-400">Diese Kategorien ignorieren.</p>
                     </div>
                   </div>
                 )}
@@ -749,48 +700,36 @@ export default function BusinessScraper() {
             </div>
           </div>
 
-          {/* Start Button */}
-          <div className="flex gap-4">
+          {/* Action Buttons */}
+          <div className="flex gap-3">
             <button
               onClick={startScraping}
               disabled={!file || processing}
-              className="flex-1 bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+              className="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-pink-700 disabled:opacity-30 disabled:cursor-not-allowed text-white py-3 px-6 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-900/30"
             >
-             {processing ? (
-                <>
-                  <Loader className="animate-spin mr-2" />
-                  {t.processing}
-                </>
-              ) : (
-                <>
-                  <Play className="mr-2" />
-                  {t.startButton}
-                </>
-              )}
+              {processing ? <><Loader className="animate-spin w-4 h-4" />{t.processing}</> : <><Play className="w-4 h-4" />{t.startButton}</>}
             </button>
-            
             {processing && (
               <button
                 onClick={cancelScraping}
-                className="bg-red-500 text-white py-3 px-6 rounded-lg font-semibold hover:bg-red-600 transition-colors flex items-center justify-center"
+                className="bg-red-50 border border-red-300 text-red-600 hover:bg-red-100 py-3 px-5 rounded-xl font-semibold transition-colors flex items-center gap-2"
               >
-                  <AlertCircle className="mr-2" />
-                  {t.cancelButton}
+                <AlertCircle className="w-4 h-4" />{t.cancelButton}
               </button>
             )}
           </div>
 
           {/* Resume Section */}
           {!processing && (
-            <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-              <h4 className="text-sm font-semibold text-gray-700 mb-2">Session fortsetzen</h4>
+            <div className="mt-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
+              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2.5">Session fortsetzen</h4>
               <div className="flex gap-2">
                 <input
                   type="text"
                   value={resumeSessionId}
                   onChange={e => setResumeSessionId(e.target.value)}
                   placeholder="Session-ID eingeben..."
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="flex-1 px-3 py-2 rounded-lg text-sm border"
                 />
                 <button
                   onClick={async () => {
@@ -845,30 +784,30 @@ export default function BusinessScraper() {
 
           {/* Progress */}
           {processing && (
-            <div className="mt-6 p-4 bg-indigo-50 rounded-lg">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-indigo-900">{progress.status}</span>
-                <div className="text-right">
-                  <div className="text-sm font-semibold text-indigo-700">
+            <div className="mt-6 p-4 bg-indigo-50 rounded-xl border border-gray-200">
+              <div className="flex items-center justify-between mb-2 gap-3">
+                <span className="text-sm text-indigo-900 truncate">{progress.status}</span>
+                <div className="text-right flex-shrink-0">
+                  <div className="text-sm font-semibold tabular-nums whitespace-nowrap text-indigo-700">
                     {progress.current} / {progress.total} {t.leads} ({progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0}%)
                   </div>
                   {progress.totalSearches > 0 && (
-                    <div className="text-xs text-indigo-600 mt-1">
+                    <div className="text-xs text-gray-500 mt-1 tabular-nums">
                       {t.run} {progress.searchCount} {t.of} {progress.totalSearches}
                     </div>
                   )}
                 </div>
               </div>
-              <div className="w-full bg-indigo-200 rounded-full h-2">
+              <div className="w-full bg-gray-200 rounded-full h-1.5">
                 <div
-                  className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }}
+                  className="bg-gradient-to-r from-indigo-600 to-purple-600 h-1.5 rounded-full transition-all duration-300"
+                  style={{ width: `${progress.total ? Math.min((progress.current / progress.total) * 100, 100) : 0}%` }}
                 />
               </div>
               {sessionId && (
                 <div className="mt-3 flex items-center gap-2 text-xs text-indigo-700">
                   <span className="font-medium">Session-ID:</span>
-                  <code className="bg-indigo-100 px-2 py-0.5 rounded font-mono">{sessionId}</code>
+                  <code className="bg-indigo-100 px-2 py-0.5 rounded font-mono text-indigo-600">{sessionId}</code>
                   <button
                     onClick={() => navigator.clipboard.writeText(sessionId)}
                     className="text-indigo-500 hover:text-indigo-700 underline"
@@ -883,7 +822,7 @@ export default function BusinessScraper() {
 
           {/* Connection-dropped banner (sleep / network disconnect) */}
           {sessionDropped && (
-            <div className="mt-4 p-4 rounded-lg border bg-blue-50 border-blue-300 flex items-start gap-3">
+            <div className="mt-4 p-4 rounded-xl border bg-blue-50 border-blue-200 flex items-start gap-3">
               <AlertCircle className="h-5 w-5 text-blue-500 mt-0.5 flex-shrink-0" />
               <div className="flex-1">
                 <p className="font-semibold text-blue-900">
@@ -921,44 +860,40 @@ export default function BusinessScraper() {
 
           {/* Blocked Banner */}
           {blockedInfo && (
-            <div className={`mt-6 p-4 rounded-lg border flex items-start gap-3 ${
-              processing
-                ? 'bg-orange-50 border-orange-300'
-                : 'bg-yellow-50 border-yellow-300'
-            }`}>
-              <AlertCircle className="h-5 w-5 text-orange-500 mt-0.5 flex-shrink-0" />
+            <div className="mt-6 p-4 rounded-xl border bg-amber-50 border-amber-200 flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-amber-400 mt-0.5 flex-shrink-0" />
               <div className="flex-1">
-                <p className="font-semibold text-orange-900">
+                <p className="font-semibold text-amber-300">
                   {language === 'de'
                     ? `⚠️ Temporär von Google gesperrt`
                     : `⚠️ Temporarily blocked by Google`}
                   {' '}
-                  <span className="text-orange-600 font-normal text-sm">
+                  <span className="text-amber-400/70 font-normal text-sm">
                     ({blockedInfo.label})
                   </span>
                 </p>
-                <p className="text-sm text-orange-800 mt-1">
+                <p className="text-sm text-amber-400/80 mt-1">
                   {language === 'de'
                     ? 'Google Maps Scraping wurde pausiert. Bereits gefundene Ergebnisse bleiben erhalten.'
                     : 'Google Maps scraping has been paused. Results collected so far are preserved.'}
                 </p>
                 {processing && (
-                  <p className="text-xs text-orange-600 mt-1 italic">
+                  <p className="text-xs text-amber-500/70 mt-1 italic">
                     {language === 'de'
                       ? '⏳ Email-Enrichment läuft noch für bereits gescrapte Einträge...'
                       : '⏳ Email enrichment is still running for already-scraped entries...'}
                   </p>
                 )}
-                <p className="text-xs text-orange-500 mt-2 font-mono break-all">{blockedInfo.message}</p>
+                <p className="text-xs text-gray-400 mt-2 font-mono break-all">{blockedInfo.message}</p>
               </div>
             </div>
           )}
 
           {/* Error */}
           {error && (
-            <div className="mt-6 p-4 bg-red-50 rounded-lg border border-red-200">
-              <p className="text-red-800 flex items-center">
-                <AlertCircle className="w-5 h-5 mr-2" />
+            <div className="mt-6 p-4 bg-red-50 rounded-xl border border-red-200">
+              <p className="text-red-400 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 flex-shrink-0" />
                 {error}
               </p>
             </div>
@@ -966,31 +901,31 @@ export default function BusinessScraper() {
 
           {/* Results */}
           {results && (
-            <div className="mt-8">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-xl font-semibold text-gray-800 flex items-center">
-                  <CheckCircle className="w-6 h-6 mr-2 text-green-500" />
+            <div className="mt-6">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4 text-purple-500" />
                   {t.results} ({results.length})
                 </h2>
                 <div className="flex gap-2">
                   <button
                     onClick={downloadResults}
-                    className="bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 transition-colors flex items-center text-sm"
+                    className="bg-purple-600 hover:bg-purple-700 text-white py-1.5 px-3 rounded-lg transition-colors flex items-center text-xs gap-1.5"
                   >
-                    <Download className="w-4 h-4 mr-2" />
+                    <Download className="w-3.5 h-3.5" />
                     {t.downloadAll}
                   </button>
                   {sessionId && (
                     <div className="relative group inline-block">
-                      <button className="bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors flex items-center text-sm">
-                        <Download className="w-4 h-4 mr-2" />
+                      <button className="bg-gray-100 hover:bg-gray-200 text-gray-700 py-1.5 px-3 rounded-lg transition-colors flex items-center text-xs gap-1.5 border border-gray-200">
+                        <Download className="w-3.5 h-3.5" />
                         {t.downloadSplit}
-                        <ChevronDown className="w-4 h-4 ml-1" />
+                        <ChevronDown className="w-3.5 h-3.5" />
                       </button>
-                      <div className="absolute right-0 mt-1 w-40 bg-white border border-gray-200 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                      <div className="absolute right-0 mt-1 w-40 bg-white border border-gray-200 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
                         <a
                           href={`/api/history/${sessionId}/download?split=true&format=excel`}
-                          className="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-t-lg"
+                          className="block px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-100 rounded-t-xl"
                           target="_blank"
                           rel="noopener noreferrer"
                         >
@@ -998,7 +933,7 @@ export default function BusinessScraper() {
                         </a>
                         <a
                           href={`/api/history/${sessionId}/download?split=true&format=zip`}
-                          className="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 rounded-b-lg border-t border-gray-100"
+                          className="block px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-100 rounded-b-xl border-t border-gray-100"
                           target="_blank"
                           rel="noopener noreferrer"
                         >
@@ -1009,48 +944,48 @@ export default function BusinessScraper() {
                   )}
                 </div>
               </div>
-              
-              <div 
-                className="overflow-auto max-h-[60vh] border rounded-lg"
+
+              <div
+                className="overflow-auto max-h-[60vh] rounded-xl border border-gray-200"
                 ref={tableContainerRef}
                 onScroll={handleScroll}
               >
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 sticky top-0">
                     <tr>
-                      <th className="px-4 py-2 text-left font-semibold">{t.city}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.industry}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.name}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.price}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.phone}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.website}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.rating}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.hours}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.email}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.owner}</th>
-                      <th className="px-4 py-2 text-left font-semibold">{t.status}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.city}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.industry}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.name}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.price}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.phone}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.website}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.rating}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.hours}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.email}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.owner}</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{t.status}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {results.map((r: BusinessResult, i: number) => (
-                      <tr key={i} className="border-t hover:bg-gray-50">
-                        <td className="px-4 py-2">{r.stadt}</td>
-                        <td className="px-4 py-2">{r.branche}</td>
-                        <td className="px-4 py-2">{r.name || '-'}</td>
-                        <td className="px-4 py-2">{r.price || '-'}</td>
-                        <td className="px-4 py-2">{r.telefon || '-'}</td>
+                      <tr key={i} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
+                        <td className="px-4 py-2 text-gray-700">{r.stadt}</td>
+                        <td className="px-4 py-2 text-gray-500">{r.branche}</td>
+                        <td className="px-4 py-2 text-gray-900">{r.name || '-'}</td>
+                        <td className="px-4 py-2 text-gray-500">{r.price || '-'}</td>
+                        <td className="px-4 py-2 text-gray-500">{r.telefon || '-'}</td>
                         <td className="px-4 py-2">
                           {r.website ? (
-                            <a href={r.website} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                            <a href={r.website} target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:text-purple-500 hover:underline">
                               Website
                             </a>
-                          ) : '-'}
+                          ) : <span className="text-gray-400">-</span>}
                         </td>
                         <td className="px-4 py-2">
                           {r.rating ? (
                             <div className="flex items-center gap-1">
-                              <span className="text-yellow-600">⭐</span>
-                              <span className="font-medium">{r.rating.toFixed(1)}</span>
+                              <span>⭐</span>
+                              <span className="font-medium text-gray-900">{r.rating.toFixed(1)}</span>
                               {r.reviews && <span className="text-gray-500 text-xs">({r.reviews})</span>}
                             </div>
                           ) : (
@@ -1073,16 +1008,16 @@ export default function BusinessScraper() {
                             <span className="text-gray-400">-</span>
                           )}
                         </td>
-                         <td className="px-4 py-2">
+                        <td className="px-4 py-2">
                           {r.owner ? (
                             <span className="text-blue-600 font-medium">{r.owner}</span>
                           ) : (
-                             <span className="text-gray-400">-</span>
+                            <span className="text-gray-400">-</span>
                           )}
                         </td>
                         <td className="px-4 py-2">
-                          <span className={`text-xs px-2 py-1 rounded ${
-                            r.status === 'success' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${
+                            r.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
                           }`}>
                             {r.status}
                           </span>
@@ -1096,9 +1031,9 @@ export default function BusinessScraper() {
           )}
 
           {/* Instructions */}
-          <div className="mt-8 p-4 bg-gray-50 rounded-lg text-sm text-gray-600">
-            <h3 className="font-semibold text-gray-800 mb-2">{t.howItWorks}</h3>
-            <ol className="list-decimal list-inside space-y-1">
+          <div className="mt-6 p-4 bg-gray-50 rounded-xl border border-gray-100">
+            <h3 className="font-semibold text-gray-500 mb-2 uppercase tracking-wider text-xs">{t.howItWorks}</h3>
+            <ol className="list-decimal list-inside space-y-1 text-sm text-gray-400">
               <li>{t.step1}</li>
               <li>{t.step2}</li>
               <li>{t.step3}</li>
@@ -1109,83 +1044,83 @@ export default function BusinessScraper() {
 
           {activeTab === 'history' && (
             <div className="space-y-4">
-               {history.length === 0 ? (
-                 <p className="text-gray-500 text-center py-8">Keine Scrape-Historie gefunden.</p>
-               ) : (
-                 <div className="overflow-x-auto">
-                   <table className="w-full text-sm text-left border rounded-lg">
-                     <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b">
-                       <tr>
-                         <th className="px-6 py-3">Datum</th>
-                         <th className="px-6 py-3">Session ID</th>
-                         <th className="px-6 py-3">Status</th>
-                         <th className="px-6 py-3">Jobs</th>
-                         <th className="px-6 py-3">Aktion</th>
-                       </tr>
-                     </thead>
-                     <tbody>
-                       {history.map((session) => (
-                         <tr key={session.id} className="bg-white border-b hover:bg-gray-50 last:border-b-0">
-                           <td className="px-6 py-4">
-                             {new Date(session.created_at).toLocaleString()}
-                           </td>
-                            <td className="px-6 py-4 font-mono text-xs text-gray-500">
-                             {session.id}
-                           </td>
-                           <td className="px-6 py-4">
-                             <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                               session.status === 'active' ? 'bg-blue-100 text-blue-800' :
-                               session.status === 'done' ? 'bg-green-100 text-green-800' :
-                               'bg-gray-100 text-gray-800'
-                             }`}>
-                               {session.status}
-                             </span>
-                           </td>
-                           <td className="px-6 py-4 text-gray-600">
-                             {session.total_jobs}
-                           </td>
-                           <td className="px-6 py-4">
-                             <div className="flex flex-col gap-1">
-                               <a
-                                 href={`/api/history/${session.id}/download`}
-                                 className="font-medium text-indigo-600 hover:text-indigo-800 flex items-center gap-1 whitespace-nowrap"
-                                 target="_blank"
-                                 rel="noopener noreferrer"
-                               >
-                                 <Download className="w-4 h-4" /> CSV
-                               </a>
-                               <div className="relative group inline-block">
-                                 <button className="font-medium text-green-600 hover:text-green-800 flex items-center gap-1 whitespace-nowrap">
-                                   <Download className="w-4 h-4" /> Aufgeteilt
-                                   <ChevronDown className="w-3 h-3" />
-                                 </button>
-                                 <div className="absolute left-0 mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-                                   <a
-                                     href={`/api/history/${session.id}/download?split=true&format=excel`}
-                                     className="block px-3 py-2 text-xs text-gray-700 hover:bg-green-50 hover:text-green-700 rounded-t-lg"
-                                     target="_blank"
-                                     rel="noopener noreferrer"
-                                   >
-                                     Excel (.xlsx)
-                                   </a>
-                                   <a
-                                     href={`/api/history/${session.id}/download?split=true&format=zip`}
-                                     className="block px-3 py-2 text-xs text-gray-700 hover:bg-green-50 hover:text-green-700 rounded-b-lg border-t border-gray-100"
-                                     target="_blank"
-                                     rel="noopener noreferrer"
-                                   >
-                                     CSV (ZIP)
-                                   </a>
-                                 </div>
-                               </div>
-                             </div>
-                           </td>
-                         </tr>
-                       ))}
-                     </tbody>
-                   </table>
-                 </div>
-               )}
+              {history.length === 0 ? (
+                <p className="text-gray-400 text-center py-8">Keine Scrape-Historie gefunden.</p>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-gray-200">
+                  <table className="w-full text-sm text-left">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Datum</th>
+                        <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Session ID</th>
+                        <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                        <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Jobs</th>
+                        <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Aktion</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.map((session) => (
+                        <tr key={session.id} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
+                          <td className="px-6 py-4 text-gray-500">
+                            {new Date(session.created_at).toLocaleString()}
+                          </td>
+                          <td className="px-6 py-4 font-mono text-xs text-gray-400">
+                            {session.id}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                              session.status === 'active' ? 'bg-blue-100 text-blue-600' :
+                              session.status === 'done' ? 'bg-green-100 text-green-600' :
+                              'bg-gray-100 text-gray-500'
+                            }`}>
+                              {session.status}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-gray-500">
+                            {session.total_jobs}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col gap-1">
+                              <a
+                                href={`/api/history/${session.id}/download`}
+                                className="font-medium text-indigo-600 hover:text-indigo-700 flex items-center gap-1 whitespace-nowrap"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                <Download className="w-4 h-4" /> CSV
+                              </a>
+                              <div className="relative group inline-block">
+                                <button className="font-medium text-gray-500 hover:text-gray-700 flex items-center gap-1 whitespace-nowrap">
+                                  <Download className="w-4 h-4" /> Aufgeteilt
+                                  <ChevronDown className="w-3 h-3" />
+                                </button>
+                                <div className="absolute left-0 mt-1 w-32 bg-white border border-gray-200 rounded-xl shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                                  <a
+                                    href={`/api/history/${session.id}/download?split=true&format=excel`}
+                                    className="block px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 rounded-t-xl"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    Excel (.xlsx)
+                                  </a>
+                                  <a
+                                    href={`/api/history/${session.id}/download?split=true&format=zip`}
+                                    className="block px-3 py-2 text-xs text-gray-700 hover:bg-gray-100 rounded-b-xl border-t border-gray-100"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    CSV (ZIP)
+                                  </a>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
           {activeTab === 'splitter' && (
@@ -1200,8 +1135,11 @@ export default function BusinessScraper() {
               setEnrichmentWorkerCount={setEnrichmentWorkerCount}
             />
           )}
-        </div>
-      </div>
+
+          </div>{/* /glass card */}
+        </div>{/* /centering */}
+      </div>{/* /content */}
     </div>
+
   );
 }

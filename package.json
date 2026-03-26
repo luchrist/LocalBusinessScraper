@@ -1,12 +1,20 @@
 {
-  "name": "local-business-scraper",
+  "name": "autosetter",
   "version": "0.1.0",
+  "description": "Lead-Generierung auf Autopilot",
+  "author": "Autosetter",
   "private": true,
+  "main": "electron-dist/main.js",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "electron:compile": "tsc -p tsconfig.electron.json",
+    "electron:dev": "concurrently -k \"next dev\" \"wait-on http://localhost:3000 && NODE_ENV=development electron .\"",
+    "electron:build": "npm run build && npm run electron:compile && npm run electron:copy-workers && npm run electron:rebuild-native && electron-builder",
+    "electron:rebuild-native": "electron-rebuild -f -w better-sqlite3,node-llama-cpp",
+    "electron:copy-workers": "mkdir -p .next/standalone/src/lib && cp src/lib/llm-worker.mjs .next/standalone/src/lib/ && cp -r .next/static .next/standalone/.next/ && (cp -r public .next/standalone/ 2>/dev/null || true)"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",
@@ -21,14 +29,19 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.7.0",
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.1.0",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^8.0.1"
   }
 }

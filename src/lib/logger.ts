@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-const LOG_DIR = path.join(process.cwd(), 'logs');
+const LOG_DIR = process.env.ELECTRON_LOG_DIR ?? path.join(process.cwd(), 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'scraper.log');
 
 // Defer directory creation to first write operation

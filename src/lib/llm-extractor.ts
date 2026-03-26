@@ -52,7 +52,7 @@ async function getWorker(): Promise<Worker | null> {
   isInitializing = true;
   initPromise = new Promise<void>((resolve) => {
     logger.log("🚀 Spawning LLM Worker thread...");
-    const workerPath = path.resolve(process.cwd(), 'src/lib/llm-worker.mjs');
+    const workerPath = process.env.LLM_WORKER_PATH ?? path.resolve(process.cwd(), 'src/lib/llm-worker.mjs');
     llmWorker = new Worker(workerPath);
 
     llmWorker.on('message', (msg) => {

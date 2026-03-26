@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'session required' }, { status: 400 });
   }
 
-  const dbPath = path.join(process.cwd(), 'scraper-data', `${sessionId}.db`);
+  const dbPath = path.join(process.env.ELECTRON_DATA_DIR ?? path.join(process.cwd(), 'scraper-data'), `${sessionId}.db`);
   if (!fs.existsSync(dbPath)) {
     return NextResponse.json({ error: 'Session not found' }, { status: 404 });
   }

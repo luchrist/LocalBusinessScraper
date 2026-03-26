@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const DATA_DIR = path.join(process.cwd(), 'scraper-data');
+const DATA_DIR = process.env.ELECTRON_DATA_DIR ?? path.join(process.cwd(), 'scraper-data');
 
 // Lazy initialize the data directory
 function ensureDataDir() {

@@ -1,0 +1,57 @@
+appId: com.autosetter.app
+productName: Autosetter
+copyright: Copyright © 2026
+
+directories:
+  output: dist
+  buildResources: build-resources
+
+files:
+  - electron-dist/**
+  - .next/standalone/**
+  - "!.next/standalone/node_modules/electron/**"
+  - "!.next/standalone/node_modules/electron-builder/**"
+  - "!.next/standalone/node_modules/typescript/**"
+  - "!.next/standalone/node_modules/caniuse-lite/**"
+  - "!.next/standalone/node_modules/source-map/**"
+  - "!.next/standalone/node_modules/source-map-js/**"
+  - "!.next/standalone/node_modules/@swc/**"
+  - "!.next/standalone/node_modules/**/*.md"
+  - "!.next/standalone/node_modules/**/*.ts"
+  - "!.next/standalone/node_modules/**/test/**"
+  - "!.next/standalone/node_modules/**/tests/**"
+  - package.json
+
+# Disable asar so native modules (better-sqlite3, node-llama-cpp) work correctly
+asar: false
+
+# Native modules are rebuilt via electron:rebuild-native npm script before packaging
+npmRebuild: false
+
+mac:
+  category: public.app-category.productivity
+  icon: build-resources/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - arm64
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+linux:
+  icon: build-resources/icon.png
+  category: Office
+  target:
+    - target: AppImage
+      arch:
+        - x64
