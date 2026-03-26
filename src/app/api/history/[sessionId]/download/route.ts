@@ -59,7 +59,8 @@ export async function GET(
 
     const csvData = places.map((p: any) => {
       const fallback = normalizeOwnerNameString(p.owner);
-      const ownerSalutations = sanitizeOwnerListField(p.owner_salutations ?? fallback.ownerSalutations);
+      const rawSalutations = sanitizeOwnerListField(p.owner_salutations ?? fallback.ownerSalutations);
+      const ownerSalutations = rawSalutations ? rawSalutations.replace(/\bHerrn\b/g, 'Herr') : rawSalutations;
       const ownerFirstNames = sanitizeOwnerListField(p.owner_first_names ?? fallback.ownerFirstNames);
       const ownerLastNames = sanitizeOwnerListField(p.owner_last_names ?? fallback.ownerLastNames);
 
@@ -111,7 +112,13 @@ export async function GET(
           row['Geschäftsführer Vorname'],
           row['Geschäftsführer Nachname'],
         );
-        if (isAnredeNachname) anredeNachnameRows.push(row);
+        if (isAnredeNachname) {
+          if (!row['Anrede']?.trim()) {
+            ohneNameRows.push(row);
+          } else {
+            anredeNachnameRows.push(row);
+          }
+        }
         if (isFirstnameNoAnrede) vornameOhneAnredeRows.push(row);
       }
 
