@@ -1,3 +1,5 @@
+import { isLikelyPersonName } from './extractNames';
+
 export const OWNER_LIST_SEPARATOR = ' & ';
 
 export function sanitizeOwnerListField(value: string | null | undefined): string | null {
@@ -46,6 +48,26 @@ function splitOwnerCandidates(ownerText: string): string[] {
     .split(/\s*(?:\||;|,|\n|\bund\b|&|\/+)\s*/i)
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function removeSingleLetterInitials(value: string): string {
+  const parts = value.split(/\s+/).filter(Boolean);
+  const withoutInitials = parts.filter((part) => {
+    const normalized = part.replace(/[.'’\-]/g, '');
+    return !/^[A-Za-zÀ-ÖØ-öø-ÿ]$/u.test(normalized);
+  });
+  return withoutInitials.join(' ').trim();
+}
+
+function cleanOwnerCandidate(value: string): string {
+  const cleaned = value
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/^[\s:,\-–—]+/, '')
+    .replace(/[\s,.;:]+$/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  return removeSingleLetterInitials(cleaned);
 }
 
 function isAllCaps(str: string): boolean {
@@ -147,8 +169,13 @@ function joinList(values: string[]): string | null {
 }
 
 export function normalizeOwnerNamesFromCandidates(candidates: string[]): OwnerNameNormalization {
-  const uniqueCandidates = uniquePreserve(candidates);
-  const rawOwners = uniqueCandidates.map(splitNameByRule);
+  const uniqueCandidates = uniquePreserve(
+    candidates
+      .map((candidate) => cleanOwnerCandidate(candidate))
+      .filter((candidate) => candidate.length > 0)
+  );
+  const validCandidates = uniqueCandidates.filter((candidate) => isLikelyPersonName(candidate));
+  const rawOwners = validCandidates.map(splitNameByRule);
 
   // Deduplicate by combination of first name and last name
   const owners: ParsedOwnerName[] = [];

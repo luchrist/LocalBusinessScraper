@@ -356,9 +356,15 @@ export async function POST(request: NextRequest) {
             if (placeR.website && (searchEmail || searchOwner)) {
               const siteContext = await createEnrichmentContext();
               try {
-                const info = await findContactInfo(siteContext, placeR.website, (msg) => logger.log(msg), {
-                  searchEmail, searchOwner, country, businessName: placeR.name, industry: placeR.branche, businessCity: placeR.stadt,
-                });
+                const ENRICHMENT_TIMEOUT_MS = 90_000;
+                const info = await Promise.race([
+                  findContactInfo(siteContext, placeR.website, (msg) => logger.log(msg), {
+                    searchEmail, searchOwner, country, businessName: placeR.name, industry: placeR.branche, businessCity: placeR.stadt,
+                  }),
+                  new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error(`Enrichment timeout after ${ENRICHMENT_TIMEOUT_MS / 1000}s`)), ENRICHMENT_TIMEOUT_MS)
+                  ),
+                ]);
                 email = info.email;
                 owner = info.owner;
                 ownerSalutations = info.ownerSalutations;

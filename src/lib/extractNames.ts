@@ -36,7 +36,18 @@ const NON_NAME_TOKENS = new Set([
   // Rollen-/Organisationsbegriffe, die kein Namensbestandteil sind
   "gf", "geschäftsführer", "geschaeftsfuehrer", "geschäftsführung", "geschaeftsfuehrung",
   "inhaber", "inhaberin", "registergericht", "amtsgericht", "finanzamt",
-  "ristorante", "gasthaus", "landeshauptstadt",
+  "ristorante", "gasthaus", "landeshauptstadt", "streitbeilegungsstelle", "datenschutzbeauftragte", "datenschutzbeauftragter", "streitschlichtung"
+  ,
+  // Zusätzliche hart geblockte Wörter (dürfen auch nicht als Namensbestandteil vorkommen)
+  "digital", "besitzer", "allgemein", "nützlich", "nuetzlich", "technisch",
+  "zusätzlich", "zusaetzlich", "schloss", "wirtschaft", "gasthof", "wirtshaus",
+  "inhalt", "internet", "werbung", "historisch", "fachbareich", "autohof",
+  "gesellschafter", "ordnungsamt", "weiterführend", "weiterfuehrend", "kino",
+  "gewerbeamt", "betriebsstätte", "betriebsstaette", "zuständig", "zustaendig",
+  "stübchen", "stuebchen", "stube", "mountain", "eigene", "lizens", "unsere",
+  "haftungshinweis", "serviceleistung",
+  // Exakt geblockte Einzelwörter
+  "für", "fuer", "view", "film"
 ]);
 
 const BLOCKED_NAME_PATTERNS: RegExp[] = [
@@ -71,6 +82,10 @@ const BLOCKED_NAME_PATTERNS: RegExp[] = [
   /\bbankverbindung\b/iu,
   /\bvorarl?berg\b/iu,
   /\brealisierung\b/iu,
+  /\bstreitschlichtung\b/iu,
+  /\bdatenschutz\b/iu,
+  /\bbeauftragt\b/iu,
+  /\bin\s+verbindung\b/iu
 ];
 
 const STOP_BY_DIGITS = /\d/; // Adressen etc. raus
@@ -179,7 +194,11 @@ function looksLikeBusinessLine(s: string): boolean {
 }
 
 function containsNonNameToken(s: string): boolean {
-  return s.toLowerCase().split(/\s+/).some(t => NON_NAME_TOKENS.has(t));
+  return s
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .some(t => NON_NAME_TOKENS.has(t));
 }
 
 function containsBlockedNamePattern(s: string): boolean {
@@ -232,7 +251,7 @@ function containsBlockedExactName(
   return false;
 }
 
-function isLikelyPersonName(s: string, blockedExactNames: Set<string> = new Set()): boolean {
+export function isLikelyPersonName(s: string, blockedExactNames: Set<string> = new Set()): boolean {
   if (!s) return false;
   if (STOP_BY_DIGITS.test(s)) return false;
   if (looksLikeBusinessLine(s)) return false;

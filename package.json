@@ -12,9 +12,9 @@
     "lint": "eslint",
     "electron:compile": "tsc -p tsconfig.electron.json",
     "electron:dev": "concurrently -k \"next dev\" \"wait-on http://localhost:3000 && NODE_ENV=development electron .\"",
-    "electron:build": "npm run build && npm run electron:compile && npm run electron:copy-workers && npm run electron:rebuild-native && electron-builder",
+    "electron:build": "npm run build && npm run electron:compile && npm run electron:rebuild-native && npm run electron:copy-workers && electron-builder",
     "electron:rebuild-native": "electron-rebuild -f -w better-sqlite3,node-llama-cpp",
-    "electron:copy-workers": "mkdir -p .next/standalone/src/lib && cp src/lib/llm-worker.mjs .next/standalone/src/lib/ && cp -r .next/static .next/standalone/.next/ && (cp -r public .next/standalone/ 2>/dev/null || true)"
+    "electron:copy-workers": "mkdir -p .next/standalone/src/lib && cp src/lib/llm-worker.mjs .next/standalone/src/lib/ && cp -r .next/static .next/standalone/.next/ && (cp -r public .next/standalone/ 2>/dev/null || true) && cp -r node_modules/node-llama-cpp .next/standalone/node_modules/ && cp -r node_modules/better-sqlite3 .next/standalone/node_modules/"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

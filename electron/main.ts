@@ -3,6 +3,8 @@ import { utilityProcess, UtilityProcess } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
+import * as https from 'https';
+import * as os from 'os';
 import { execFile } from 'child_process';
 
 const isDev = !app.isPackaged;
@@ -101,6 +103,87 @@ function installChromium(onProgress: (msg: string) => void): Promise<void> {
       else reject(new Error(`playwright install chromium exited with code ${code}`));
     });
     proc.on('error', reject);
+  });
+}
+
+// ─── Model download ───────────────────────────────────────────────────────────
+
+function getModelInfo(): { filename: string; url: string } {
+  const gbRam = os.totalmem() / 1024 ** 3;
+  if (gbRam > 8) {
+    return {
+      filename: 'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+      url: 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+    };
+  }
+  return {
+    filename: 'qwen2.5-1.5b-instruct-q4_k_m.gguf',
+    url: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf',
+  };
+}
+
+function downloadModel(destDir: string, onProgress: (msg: string) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const { filename, url } = getModelInfo();
+    const destPath = path.join(destDir, filename);
+
+    if (fs.existsSync(destPath)) {
+      resolve();
+      return;
+    }
+
+    const tmpPath = destPath + '.tmp';
+
+    const download = (downloadUrl: string, redirectCount = 0) => {
+      if (redirectCount > 5) { reject(new Error('Zu viele Redirects beim Model-Download')); return; }
+      const mod = downloadUrl.startsWith('https') ? https : http;
+      (mod as typeof https).get(downloadUrl, { headers: { 'User-Agent': 'Autosetter/1.0' } }, (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          download(res.headers.location, redirectCount + 1);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          reject(new Error(`Model-Download fehlgeschlagen: HTTP ${res.statusCode}`));
+          return;
+        }
+
+        const totalBytes = parseInt(res.headers['content-length'] || '0', 10);
+        let downloadedBytes = 0;
+        let lastReportedPct = -1;
+
+        const fileStream = fs.createWriteStream(tmpPath);
+        res.on('data', (chunk: Buffer) => {
+          downloadedBytes += chunk.length;
+          if (totalBytes > 0) {
+            const pct = Math.floor((downloadedBytes / totalBytes) * 100);
+            if (pct !== lastReportedPct) {
+              lastReportedPct = pct;
+              const mb = Math.round(downloadedBytes / 1024 / 1024);
+              const totalMb = Math.round(totalBytes / 1024 / 1024);
+              onProgress(`KI-Modell wird heruntergeladen: ${mb} / ${totalMb} MB (${pct}%)`);
+            }
+          }
+        });
+        res.pipe(fileStream);
+        fileStream.on('finish', () => {
+          fileStream.close(() => {
+            fs.renameSync(tmpPath, destPath);
+            onProgress('KI-Modell installiert.');
+            resolve();
+          });
+        });
+        fileStream.on('error', (err) => {
+          fs.unlink(tmpPath, () => {});
+          reject(err);
+        });
+      }).on('error', (err) => {
+        fs.unlink(tmpPath, () => {});
+        reject(err);
+      });
+    };
+
+    onProgress(`KI-Modell wird heruntergeladen (einmalig, ~${getModelInfo().filename.includes('Llama') ? '4.6' : '1'} GB)…`);
+    download(url);
   });
 }
 
@@ -269,6 +352,8 @@ async function startup(): Promise<void> {
       setStatus(splash, 'Browser erfolgreich installiert.');
       await new Promise((r) => setTimeout(r, 400));
     }
+
+    await downloadModel(getModelsDir(), (msg) => setStatus(splash, msg));
 
     if (!isDev) {
       setStatus(splash, 'Server wird gestartet…');

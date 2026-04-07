@@ -1,5 +1,6 @@
 import { Page, BrowserContext } from 'playwright';
 import * as cheerio from 'cheerio';
+import { domainToUnicode } from 'node:url';
 import { extractNamesDetailed } from './extractNames';
 import { scrapeImprintLightbox } from './lightBoxScrape';
 import { normalizeOwnerNameString, normalizeOwnerNamesFromCandidates } from './owner-name-normalizer';
@@ -312,8 +313,11 @@ export async function extractOwnerFromText(text: string, businessInfo: { name?: 
         const llmOwner = await extractOwnerWithLLM(text, businessInfo);
         if (llmOwner) {
           const normalized = normalizeOwnerNameString(llmOwner);
-          log(`   👤 Owner found (LLM): ${normalized.ownerDisplay}`);
-          return normalized.ownerDisplay;
+          if (normalized.ownerDisplay && normalized.owners.some(o => o.fullName.trim().length > 0)) {
+            log(`   👤 Owner found (LLM): ${normalized.ownerDisplay}`);
+            return normalized.ownerDisplay;
+          }
+          log(`   ⚠️ LLM owner candidates removed by post-filtering.`);
       }
     } catch (llmError) {
       log(`   ⚠️ LLM extraction unavailable: ${llmError instanceof Error ? llmError.message : String(llmError)}`);
@@ -340,12 +344,15 @@ export async function extractOwnerDetailsFromText(
 async function extractEmailFromPage(page: Page, domain: string, isMainPage: boolean, log: (msg: string) => void): Promise<string | null> {
   // 1. Mailto links
   log(`   🔍 Checking mailto: links...`);
-  const mailtoLinks = await page.$$eval('a[href^="mailto:"]', (anchors: HTMLAnchorElement[]) =>
-    anchors.map((a: HTMLAnchorElement) => {
-      const href = a.getAttribute('href') || '';
-      return href.replace('mailto:', '').split('?')[0].trim();
-    })
-  );
+  const mailtoLinks = await Promise.race([
+    page.$$eval('a[href^="mailto:"]', (anchors: HTMLAnchorElement[]) =>
+      anchors.map((a: HTMLAnchorElement) => {
+        const href = a.getAttribute('href') || '';
+        return href.replace('mailto:', '').split('?')[0].trim();
+      })
+    ),
+    new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 15000)),
+  ]).catch(() => [] as string[]);
   
   if (mailtoLinks.length > 0) {
     // ... check mailto links ...
@@ -367,7 +374,7 @@ async function extractEmailFromPage(page: Page, domain: string, isMainPage: bool
 
   // 2. Text content
   log(`   🔍 Finding emails in text...`);
-  const text = await page.textContent('body');
+  const text = await page.textContent('body', { timeout: 15000 }).catch(() => null);
   if (!text) {
     log(`   ⚠️  No text content found on page`);
     return null;
@@ -379,8 +386,11 @@ async function extractEmailFromPage(page: Page, domain: string, isMainPage: bool
 async function searchPageForOwner(page: Page, businessInfo: { name?: string, industry?: string, city?: string }, log: (msg: string) => void): Promise<OwnerExtractionResult> {
   try {
     // Prefer innerText to preserve structure/newlines, fallback to textContent
-    let text = await page.evaluate(() => document.body.innerText).catch(() => null);
-    if (!text) text = await page.textContent('body');
+    let text = await Promise.race([
+      page.evaluate(() => document.body.innerText),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
+    ]).catch(() => null);
+    if (!text) text = await page.textContent('body', { timeout: 15000 }).catch(() => null);
     
     if (!text) {
       return { owner: null, ownerSalutations: null, ownerFirstNames: null, ownerLastNames: null };
@@ -438,7 +448,7 @@ async function tryHttpScrape(url: string, domain: string, options: { searchEmail
         if (options.searchOwner || (!result.email && options.searchEmail)) {
             const $ = cheerio.load(text);
             let targetUrl = null;
-            $('a').each((_, el) => {
+            $('a').each((_index: number, el: any) => {
                 const href = $(el).attr('href');
                 if (href && (imprintPattern.test(href) || imprintPattern.test($(el).text()))) {
                    if (href.startsWith('http')) targetUrl = href;
@@ -532,6 +542,9 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
            } catch (gotoErr: any) {
              if (gotoErr.message && gotoErr.message.toLowerCase().includes('timeout')) {
                logger(`   ⚠️ Timeout waiting for domcontentloaded on ${url}, attempting to extract from partial load...`);
+               // Stop ongoing navigation so subsequent page.evaluate() calls don't
+               // queue behind a never-completing network request and hang indefinitely.
+               try { await page.evaluate(() => window.stop(), { timeout: 3000 } as any); } catch {}
              } else {
                throw gotoErr;
              }
@@ -580,19 +593,18 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
         
         const homepageCanonicalUrl = canonicalizeForSubpageCheck(baseUrl.href);
 
-        const subpages = rawLinks
-          .map((link) => {
+        const subpages: string[] = rawLinks
+          .map((link: string) => {
             try {
               return canonicalizeForSubpageCheck(new URL(link, baseUrl).href);
             } catch {
               return null;
             }
           })
-          .filter((link): link is string => {
+          .filter((link: string | null): link is string => {
             if (!link) return false;
             try {
               const u = new URL(link);
-              const { domainToUnicode } = require('node:url');
               const sameDomain = domainToUnicode(u.hostname).replace(/^www\./, '') === domain;
               const isHomepageVariant = homepageCanonicalUrl ? link === homepageCanonicalUrl : false;
               const isBinaryFile = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|zip|rar|tar\.gz|gz|7z|png|jpe?g|gif|svg|webp|ico|mp4|mp3|avi|mov|wmv)$/i.test(u.pathname);
@@ -614,11 +626,11 @@ async function tryPlaywrightScrape(context: BrowserContext, websiteUrl: string, 
         };
 
         const primaryOwnerCandidates = orderedPages
-          .filter((url) => scoreOwnerPrimary(url) > 0 || imprintPattern.test(url))
+          .filter((url: string) => scoreOwnerPrimary(url) > 0 || imprintPattern.test(url))
           .sort((a, b) => scoreOwnerPrimary(b) - scoreOwnerPrimary(a));
 
         const teamFallbackCandidates = orderedPages
-          .filter((url) => scoreOwnerPrimary(url) === 0 && TEAM_REGEX.test(decodeURIComponent(url)));
+          .filter((url: string) => scoreOwnerPrimary(url) === 0 && TEAM_REGEX.test(decodeURIComponent(url)));
 
         const primaryOwnerTargetUrl = primaryOwnerCandidates[0] || null;
         const teamFallbackTargetUrl = teamFallbackCandidates[0] || null;
@@ -675,7 +687,6 @@ export async function findContactInfo(context: BrowserContext, websiteUrl: strin
 
   logger(`🕷️  Starting scraping for: ${websiteUrl} (email: ${searchEmail}, owner: ${searchOwner}, country: ${country})`);
 
-  const { domainToUnicode } = require('node:url');
   let baseUrl: URL;
   try {
     baseUrl = new URL(websiteUrl);
