@@ -193,6 +193,31 @@ export default function BusinessScraper() {
     return () => window.removeEventListener('pagehide', handlePageHide);
   }, []);
 
+  // Auto-reconnect: poll snapshot when connection drops until enrichment finishes
+  React.useEffect(() => {
+    if (!sessionDropped || !sessionId) return;
+    let cancelled = false;
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const res = await fetch(`/api/scrape/snapshot?session=${sessionId}`);
+          if (!res.ok) break;
+          const data = await res.json();
+          setResults(data.results);
+          if (!data.stillRunning) {
+            setSessionDropped(false);
+            setProgress(p => ({ ...p, status: language === 'de' ? '✅ Enrichment abgeschlossen' : '✅ Enrichment complete', current: data.results.length, total: data.results.length }));
+            break;
+          }
+          setProgress(p => ({ ...p, current: data.results.filter((r: any) => r.status !== 'pending' && r.status !== 'enriching').length, total: data.results.length, status: language === 'de' ? `⏳ Noch ${data.results.filter((r: any) => r.status === 'pending' || r.status === 'enriching').length} ausstehend…` : '⏳ Still enriching…' }));
+        } catch { /* retry */ }
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    };
+    poll();
+    return () => { cancelled = true; };
+  }, [sessionDropped, sessionId, language]);
+
   React.useEffect(() => {
     if (autoScroll && tableContainerRef.current) {
       const container = tableContainerRef.current;
@@ -275,6 +300,10 @@ export default function BusinessScraper() {
     setBlockedInfo(null);
     setSessionDropped(false);
     userCancelledRef.current = false;
+
+    // Prevent macOS from sleeping during enrichment
+    const env = (window as any).electronEnv;
+    if (env?.startPowerSave) env.startPowerSave();
     setProgress({ current: 0, total: 0, status: 'Starte...', searchCount: 0, totalSearches: 0 });
 
     const controller = new AbortController();
@@ -382,6 +411,9 @@ export default function BusinessScraper() {
     } finally {
       setProcessing(false);
       setAbortController(null);
+      // Release power save blocker
+      const env = (window as any).electronEnv;
+      if (env?.stopPowerSave) env.stopPowerSave();
     }
   };
 
@@ -420,6 +452,9 @@ export default function BusinessScraper() {
     if (abortController) {
       abortController.abort();
     }
+    // Release power save blocker
+    const env = (window as any).electronEnv;
+    if (env?.stopPowerSave) env.stopPowerSave();
   };
 
   const downloadResults = () => {

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell } from 'electron';
+import { app, BrowserWindow, dialog, shell, powerSaveBlocker, ipcMain } from 'electron';
 import { utilityProcess, UtilityProcess } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -12,6 +12,7 @@ const PORT = 3100;
 
 let mainWindow: BrowserWindow | null = null;
 let serverProcess: UtilityProcess | null = null;
+let powerSaveId: number | null = null;
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
@@ -372,6 +373,24 @@ async function startup(): Promise<void> {
     app.quit();
   }
 }
+
+// ─── Power save blocker ──────────────────────────────────────────────────────
+// Prevent macOS from sleeping while enrichment is running.
+
+ipcMain.on('power-save:start', () => {
+  if (powerSaveId === null) {
+    powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
+    console.log(`[PowerSave] Blocker started (id=${powerSaveId})`);
+  }
+});
+
+ipcMain.on('power-save:stop', () => {
+  if (powerSaveId !== null && powerSaveBlocker.isStarted(powerSaveId)) {
+    powerSaveBlocker.stop(powerSaveId);
+    console.log(`[PowerSave] Blocker stopped (id=${powerSaveId})`);
+    powerSaveId = null;
+  }
+});
 
 app.whenReady().then(startup);
 

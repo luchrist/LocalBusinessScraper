@@ -1,7 +1,9 @@
 // Minimal preload – the renderer communicates with the Next.js backend
 // via standard HTTP/SSE. No Node.js APIs need to be exposed.
-import { contextBridge } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronEnv', {
   isElectron: true,
+  startPowerSave: () => ipcRenderer.send('power-save:start'),
+  stopPowerSave: () => ipcRenderer.send('power-save:stop'),
 });
