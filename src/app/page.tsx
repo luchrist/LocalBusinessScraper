@@ -339,6 +339,9 @@ export default function BusinessScraper() {
               } else if (data.type === 'result') {
                 tempResults.push(data.result);
                 setResults([...tempResults]);
+                if (data.current != null && data.total != null) {
+                  setProgress(p => ({ ...p, current: data.current, total: data.total }));
+                }
               } else if (data.type === 'complete') {
                 receivedComplete = true;
                 // Results already accumulated via individual 'result' events – no need to re-send the full array
