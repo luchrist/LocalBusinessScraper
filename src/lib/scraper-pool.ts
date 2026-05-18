@@ -51,7 +51,7 @@ export class ScraperWorker {
 
   async launch() {
     this.browser = await chromium.launch({
-      headless: true, // false for demo
+      headless: false,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -94,7 +94,7 @@ export class ScraperWorker {
     this.browser = null;
     this.searchCount = 0;
     this.browser = await chromium.launch({
-      headless: headless !== undefined ? headless : true,
+      headless: headless !== undefined ? headless : false,
       args: [
         '--no-sandbox', '--disable-setuid-sandbox',
         '--disable-accelerated-2d-canvas', '--disable-infobars',

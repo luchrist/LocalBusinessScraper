@@ -197,10 +197,13 @@ export async function POST(request: NextRequest) {
       const data = rawData.map((row: any) => {
         const maxRaw = getColumnValue(row, ['max', 'maximum', 'max_results', 'maxresults']);
         const rowMax = maxRaw ? parseInt(maxRaw) : undefined;
+        const stufeRaw = getColumnValue(row, ['stufe', 'level', 'grid', 'quadrat', 'split']);
+        const stufe = stufeRaw ? parseInt(stufeRaw) : 0;
         return {
           stadt: getColumnValue(row, ['stadt', 'city', 'ort', 'location', 'town']),
           branche: getColumnValue(row, ['branche', 'industry', 'category', 'keyword', 'niche', 'business']),
           max_results: rowMax && !isNaN(rowMax) && rowMax > 0 ? rowMax : null,
+          stufe: !isNaN(stufe) && stufe >= 1 ? stufe : 0,
         };
       }).filter(row => row.stadt && row.branche); // Filter out empty or invalid rows
 
@@ -451,13 +454,15 @@ export async function POST(request: NextRequest) {
           ? row.max_results
           : maxBusinesses;
 
-        const isApi = effectiveMax <= 60;
+        const stufe = row.stufe ?? 0;
+        // Grid searches (stufe >= 1) always use API; otherwise decide by effectiveMax
+        const isApi = stufe >= 1 || effectiveMax <= 60;
 
         const task = async () => {
           if (isSessionCancelled(db, sessionId)) return;
 
           searchCount++;
-          const mode = isApi ? 'API' : 'Scraping';
+          const mode = isApi ? (stufe >= 1 ? `API Grid Stufe ${stufe}` : 'API') : 'Scraping';
           logger.log(`🔍 [${mode}] "${branche}" in "${stadt}" (max: ${effectiveMax === Infinity ? '∞' : effectiveMax})`);
 
           await sendProgress({
@@ -470,90 +475,151 @@ export async function POST(request: NextRequest) {
           });
 
           if (isApi) {
-            // ── API PATH ────────────────────────────────────────────────────────
-          const places = await searchPlaces(
-            stadt,
-            branche,
-            effectiveMax,
-            sendProgress,
-            () => isSessionCancelled(db, sessionId)
-          );
-          logger.log(`✅ Found ${places.length} places for "${branche}" in "${stadt}"`);
+            // ── API PATH (with optional adaptive grid splitting) ────────────────
+            const jobMax = effectiveMax === Infinity ? null : effectiveMax;
+            const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: jobMax });
 
-          const jobMax = effectiveMax === Infinity ? null : effectiveMax;
-          const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: jobMax });
+            let allPlacesRaw: Place[] = [];
 
-          const uniquePlaces: Place[] = [];
-          for (const place of places) {
+            if (stufe >= 1) {
+              // Grid-based search with adaptive subdivision
+              try {
+                const gridSide = stufe + 1;
+                logger.log(`[Grid] ── Start Grid-Suche für "${branche}" in "${stadt}" ──`);
+                logger.log(`[Grid] Stufe ${stufe} → ${gridSide}×${gridSide} = ${gridSide * gridSide} Zellen`);
+                logger.log(`[Grid] Fetching bounding box for "${stadt}" (country: ${country})...`);
+                const bbox = await getCityBoundingBox(stadt, country);
+                logger.log(`[Grid] Bounding Box: N=${bbox.north.toFixed(5)} S=${bbox.south.toFixed(5)} E=${bbox.east.toFixed(5)} W=${bbox.west.toFixed(5)}`);
+                logger.log(`[Grid] Lat-Range: ${(bbox.north - bbox.south).toFixed(5)}° | Lng-Range: ${(bbox.east - bbox.west).toFixed(5)}°`);
+
+                const gridCells = splitBoundingBox(bbox, stufe);
+                logger.log(`[Grid] "${stadt}" aufgeteilt in ${gridCells.length} Zellen (Stufe ${stufe})`);
+                for (const c of gridCells) {
+                  logger.log(`[Grid]   ${c.label}: lat [${c.low.latitude.toFixed(5)} → ${c.high.latitude.toFixed(5)}] lng [${c.low.longitude.toFixed(5)} → ${c.high.longitude.toFixed(5)}]`);
+                }
+
+                await sendProgress({
+                  type: 'progress',
+                  message: `[Grid] "${stadt}" in ${gridCells.length} Quadranten aufgeteilt (Stufe ${stufe} → ${gridSide}×${gridSide})`,
+                  current: processedBusinesses,
+                  total: totalBusinessesFound,
+                  searchCount, totalSearches,
+                });
+
+                // Search each grid cell recursively (subdivides when hitting 60 results)
+                let cellIdx = 0;
+                for (const cell of gridCells) {
+                  cellIdx++;
+                  if (isSessionCancelled(db, sessionId)) {
+                    logger.log(`[Grid] Session cancelled – stopping at cell ${cellIdx}/${gridCells.length}`);
+                    break;
+                  }
+                  logger.log(`[Grid] ── Zelle ${cellIdx}/${gridCells.length}: ${cell.label} ──`);
+                  const beforeCount = allPlacesRaw.length;
+                  const cellPlaces = await searchGridCellRecursive(
+                    cell, stadt, branche, sendProgress,
+                    () => isSessionCancelled(db, sessionId),
+                  );
+                  allPlacesRaw.push(...cellPlaces);
+                  logger.log(`[Grid] ${cell.label} fertig: ${cellPlaces.length} Ergebnisse | Gesamt bisher: ${allPlacesRaw.length} (vorher: ${beforeCount})`);
+                }
+
+                logger.log(`[Grid] ── Grid-Suche abgeschlossen für "${branche}" in "${stadt}" ──`);
+                logger.log(`[Grid] Roh-Ergebnisse gesamt: ${allPlacesRaw.length} (über ${gridCells.length} Zellen + Unterteilungen)`);
+              } catch (err) {
+                logger.error(`[Grid] Fehler beim Abrufen der Bounding Box für "${stadt}":`, err);
+                logger.log(`[Grid] Fallback: Einzelsuche ohne Grid`);
+                allPlacesRaw = await searchPlaces(
+                  stadt, branche, effectiveMax, sendProgress,
+                  () => isSessionCancelled(db, sessionId),
+                );
+                logger.log(`[Grid] Fallback-Ergebnis: ${allPlacesRaw.length} Ergebnisse`);
+              }
+            } else {
+              // Single search without grid
+              allPlacesRaw = await searchPlaces(
+                stadt, branche, effectiveMax, sendProgress,
+                () => isSessionCancelled(db, sessionId),
+              );
+            }
+
+            // Deduplicate all results across grid cells
+            logger.log(`[Dedup] Starte Deduplizierung: ${allPlacesRaw.length} Roh-Ergebnisse für "${branche}" in "${stadt}"`);
+            const uniquePlaces: Place[] = [];
+            let skippedPrice = 0, skippedCategory = 0, skippedPlaceId = 0, skippedDomain = 0;
+            for (const place of allPlacesRaw) {
               if (!parsePriceAndMatch(place.price)) {
-                logger.log(`⚠️ Skipping ${place.name} due to price filter (${place.price})`);
+                skippedPrice++;
+                logger.log(`[Dedup] ⚠️ Preis-Filter: ${place.name} (${place.price})`);
                 continue;
               }
               if (!checkCategory(place.exactIndustry)) {
-                logger.log(`⚠️ Skipping ${place.name} due to category filter (${place.exactIndustry})`);
+                skippedCategory++;
+                logger.log(`[Dedup] ⚠️ Kategorie-Filter: ${place.name} (${place.exactIndustry})`);
                 continue;
               }
-            if (seenPlaceIds.has(place.id)) {
-              logger.log(`♻️ Skipping duplicate place ID: ${place.name}`);
-              continue;
+              if (seenPlaceIds.has(place.id)) {
+                skippedPlaceId++;
+                logger.log(`[Dedup] ♻️ Duplikat Place-ID: ${place.name} (${place.id})`);
+                continue;
+              }
+              let domain: string | null = null;
+              if (place.website) {
+                try { domain = new URL(place.website).hostname.replace(/^www\./, ''); } catch {}
+              }
+              if (domain && seenDomains.has(domain)) {
+                skippedDomain++;
+                logger.log(`[Dedup] ♻️ Duplikat Domain: ${domain} (${place.name})`);
+                continue;
+              }
+              seenPlaceIds.add(place.id);
+              if (domain) seenDomains.add(domain);
+              uniquePlaces.push(place);
             }
-            let domain: string | null = null;
-            if (place.website) {
-              try { domain = new URL(place.website).hostname.replace(/^www\./, ''); } catch {}
-            }
-            if (domain && seenDomains.has(domain)) {
-              logger.log(`♻️ Skipping duplicate domain: ${domain} (${place.name})`);
-              continue;
-            }
-            seenPlaceIds.add(place.id);
-            if (domain) seenDomains.add(domain);
-            uniquePlaces.push(place);
-          }
 
-          logger.log(`✅ Deduplicated: ${places.length} -> ${uniquePlaces.length} unique new places`);
-
-          // No longer adding totalBusinessesFound += uniquePlaces.length here
-          // because it is incremented inside the loop below!
-
-          await sendProgress({
-            type: 'progress',
-            message: `[API] "${branche}" in "${stadt}" – ${uniquePlaces.length} unique places found`,
-            current: processedBusinesses,
-            total: totalBusinessesFound,
-            searchCount,
-            totalSearches,
-          });
-
-          let rowProcessedCount = 0;
-          for (const place of uniquePlaces) {
-            if (isSessionCancelled(db, sessionId)) break;
-            if (rowProcessedCount >= effectiveMax) break;
-            rowProcessedCount++;
-
-            // Insert placeholder into DB immediately
-            const placeKey = place.id || `${place.name}|${place.address}`;
-            insertPlace(db, sessionId, jobId, {
-              name: place.name,
-              website: place.website,
-              phone: place.phone,
-              rating: place.rating,
-              reviews: place.reviews,
-              hours: place.hours,
-              price: place.price,
-              address: place.address,
-              placeKey: placeKey,
-              exactIndustry: place.exactIndustry,
-            });
-
-            totalBusinessesFound++;
+            logger.log(`[Dedup] ── Ergebnis: ${allPlacesRaw.length} → ${uniquePlaces.length} unique ──`);
+            logger.log(`[Dedup]   Entfernt: ${skippedPlaceId} Duplikat-IDs, ${skippedDomain} Duplikat-Domains, ${skippedPrice} Preis-Filter, ${skippedCategory} Kategorie-Filter`);;
             await sendProgress({
               type: 'progress',
-              message: `[API] Found ${place.name}`,
+              message: `[API] "${branche}" in "${stadt}" – ${uniquePlaces.length} unique Ergebnisse (${allPlacesRaw.length} roh)`,
               current: processedBusinesses,
               total: totalBusinessesFound,
               searchCount, totalSearches,
             });
-          }
+
+            let rowProcessedCount = 0;
+            for (const place of uniquePlaces) {
+              if (isSessionCancelled(db, sessionId)) break;
+              if (rowProcessedCount >= effectiveMax) break;
+              rowProcessedCount++;
+
+              const placeKey = place.id || `${place.name}|${place.address}`;
+              insertPlace(db, sessionId, jobId, {
+                name: place.name,
+                website: place.website,
+                phone: place.phone,
+                rating: place.rating,
+                reviews: place.reviews,
+                hours: place.hours,
+                price: place.price,
+                address: place.address,
+                placeKey: placeKey,
+                exactIndustry: place.exactIndustry,
+              });
+
+              totalBusinessesFound++;
+              await sendProgress({
+                type: 'progress',
+                message: `[API] Found ${place.name}`,
+                current: processedBusinesses,
+                total: totalBusinessesFound,
+                searchCount, totalSearches,
+              });
+            }
+
+            if (rowProcessedCount >= effectiveMax) {
+              logger.log(`[API] Reached max ${effectiveMax} for "${branche}" in "${stadt}"`);
+            }
         } else if (mapsPaused) {
           // Maps is blocked – skip scraping rows, enrichment for prior results is already done
           logger.log(`[Scraping] Skipping "${branche}" in "${stadt}" – Maps is paused (block detected)`);          if (rowIdx === lastScrapingRowIdx && !poolClosed) {
@@ -786,12 +852,248 @@ async function runWithLimit(tasks: (() => Promise<void>)[], limit: number) {
     await Promise.all(Array(limit).fill(0).map(worker));
 }
 
+// ── Grid Search Helpers ─────────────────────────────────────────────────────
+
+interface BoundingBox {
+  north: number; // max latitude
+  south: number; // min latitude
+  east: number;  // max longitude
+  west: number;  // min longitude
+}
+
+interface GridCell {
+  low: { latitude: number; longitude: number };
+  high: { latitude: number; longitude: number };
+  label: string; // e.g. "Quadrant 1/4"
+}
+
+/**
+ * Get bounding box for a city using Google Geocoding API.
+ */
+async function getCityBoundingBox(city: string, country: string): Promise<BoundingBox> {
+  const apiKey = getNextAvailableKey();
+  if (!apiKey) {
+    logger.error(`[BBox] Kein API-Key verfügbar für Geocoding von "${city}"`);
+    throw new Error('No API key available for geocoding');
+  }
+
+  logger.log(`[BBox] Geocoding-Request: "${city}, ${country}" (Key: ...${apiKey.slice(-4)})`);
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(city + ', ' + country)}&key=${apiKey}`;
+  const response = await fetch(url);
+  incrementApiKeyUsage(apiKey);
+
+  if (!response.ok) {
+    logger.error(`[BBox] Geocoding API Fehler: ${response.status} ${response.statusText}`);
+    throw new Error(`Geocoding API error: ${response.status}`);
+  }
+  const data = await response.json();
+
+  if (!data.results || data.results.length === 0) {
+    logger.error(`[BBox] Keine Ergebnisse für "${city}" – API gab ${data.status} zurück`);
+    throw new Error(`Geocoding: No results for "${city}"`);
+  }
+
+  const result = data.results[0];
+  const viewport = result.geometry.viewport;
+  const bounds = result.geometry.bounds;
+  logger.log(`[BBox] Ergebnis: "${result.formatted_address}"`);
+  logger.log(`[BBox] Viewport: NE(${viewport.northeast.lat.toFixed(5)}, ${viewport.northeast.lng.toFixed(5)}) SW(${viewport.southwest.lat.toFixed(5)}, ${viewport.southwest.lng.toFixed(5)})`);
+  if (bounds) {
+    logger.log(`[BBox] Bounds:   NE(${bounds.northeast.lat.toFixed(5)}, ${bounds.northeast.lng.toFixed(5)}) SW(${bounds.southwest.lat.toFixed(5)}, ${bounds.southwest.lng.toFixed(5)})`);
+  } else {
+    logger.log(`[BBox] Bounds: nicht verfügbar – nutze nur Viewport`);
+  }
+
+  // Combine viewport + bounds: take the outermost edges of both
+  const north = bounds ? Math.max(viewport.northeast.lat, bounds.northeast.lat) : viewport.northeast.lat;
+  const east  = bounds ? Math.max(viewport.northeast.lng, bounds.northeast.lng) : viewport.northeast.lng;
+  const south = bounds ? Math.min(viewport.southwest.lat, bounds.southwest.lat) : viewport.southwest.lat;
+  const west  = bounds ? Math.min(viewport.southwest.lng, bounds.southwest.lng) : viewport.southwest.lng;
+
+  logger.log(`[BBox] Kombiniert: N=${north.toFixed(5)} S=${south.toFixed(5)} E=${east.toFixed(5)} W=${west.toFixed(5)}`);
+
+  return { north, east, south, west };
+}
+
+/**
+ * Stufe (level) maps to grid size: stufe N → (N+1) × (N+1).
+ * e.g. 1 → 2×2 (4), 2 → 3×3 (9), 3 → 4×4 (16), 4 → 5×5 (25), etc.
+ */
+function stufeToGrid(stufe: number): number {
+  return stufe + 1;
+}
+
+/**
+ * Split a bounding box into a grid of cells with ~10% overlap.
+ * Uses stufeToGrid to determine the grid dimensions.
+ */
+function splitBoundingBox(bbox: BoundingBox, stufe: number): GridCell[] {
+  if (stufe < 1) return [];
+
+  const side = stufeToGrid(stufe);
+  const cols = side;
+  const rows = side;
+  const totalCells = cols * rows;
+
+  const latRange = bbox.north - bbox.south;
+  const lngRange = bbox.east - bbox.west;
+
+  const cellHeight = latRange / rows;
+  const cellWidth = lngRange / cols;
+
+  // 10% overlap on each side
+  const latOverlap = cellHeight * 0.1;
+  const lngOverlap = cellWidth * 0.1;
+
+  const cells: GridCell[] = [];
+  let cellNum = 0;
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      cellNum++;
+      const south = bbox.south + row * cellHeight - latOverlap;
+      const north = bbox.south + (row + 1) * cellHeight + latOverlap;
+      const west = bbox.west + col * cellWidth - lngOverlap;
+      const east = bbox.west + (col + 1) * cellWidth + lngOverlap;
+
+      cells.push({
+        low: { latitude: south, longitude: west },
+        high: { latitude: north, longitude: east },
+        label: `Quadrant ${cellNum}/${totalCells}`,
+      });
+    }
+  }
+
+  return cells;
+}
+
+/**
+ * Split a single grid cell in half along its longer dimension.
+ * Returns two cells with 10% overlap.
+ */
+function splitCellInHalf(cell: GridCell): [GridCell, GridCell] {
+  const latRange = cell.high.latitude - cell.low.latitude;
+  const lngRange = cell.high.longitude - cell.low.longitude;
+  const splitAxis = latRange >= lngRange ? 'horizontal (Breitengrad)' : 'vertikal (Längengrad)';
+
+  logger.log(`[Split] Teile ${cell.label} in 2 Hälften – Achse: ${splitAxis}`);
+  logger.log(`[Split]   Lat-Range: ${latRange.toFixed(5)}° | Lng-Range: ${lngRange.toFixed(5)}°`);
+
+  if (latRange >= lngRange) {
+    const mid = cell.low.latitude + latRange / 2;
+    const overlap = latRange * 0.05;
+    const cellA: GridCell = {
+      low: { latitude: cell.low.latitude, longitude: cell.low.longitude },
+      high: { latitude: mid + overlap, longitude: cell.high.longitude },
+      label: cell.label + 'a',
+    };
+    const cellB: GridCell = {
+      low: { latitude: mid - overlap, longitude: cell.low.longitude },
+      high: { latitude: cell.high.latitude, longitude: cell.high.longitude },
+      label: cell.label + 'b',
+    };
+    logger.log(`[Split]   ${cellA.label}: lat [${cellA.low.latitude.toFixed(5)} → ${cellA.high.latitude.toFixed(5)}]`);
+    logger.log(`[Split]   ${cellB.label}: lat [${cellB.low.latitude.toFixed(5)} → ${cellB.high.latitude.toFixed(5)}]`);
+    logger.log(`[Split]   Overlap-Zone: ${(mid - overlap).toFixed(5)} → ${(mid + overlap).toFixed(5)} (${(overlap * 2).toFixed(5)}°)`);
+    return [cellA, cellB];
+  } else {
+    const mid = cell.low.longitude + lngRange / 2;
+    const overlap = lngRange * 0.05;
+    const cellA: GridCell = {
+      low: { latitude: cell.low.latitude, longitude: cell.low.longitude },
+      high: { latitude: cell.high.latitude, longitude: mid + overlap },
+      label: cell.label + 'a',
+    };
+    const cellB: GridCell = {
+      low: { latitude: cell.low.latitude, longitude: mid - overlap },
+      high: { latitude: cell.high.latitude, longitude: cell.high.longitude },
+      label: cell.label + 'b',
+    };
+    logger.log(`[Split]   ${cellA.label}: lng [${cellA.low.longitude.toFixed(5)} → ${cellA.high.longitude.toFixed(5)}]`);
+    logger.log(`[Split]   ${cellB.label}: lng [${cellB.low.longitude.toFixed(5)} → ${cellB.high.longitude.toFixed(5)}]`);
+    logger.log(`[Split]   Overlap-Zone: ${(mid - overlap).toFixed(5)} → ${(mid + overlap).toFixed(5)} (${(overlap * 2).toFixed(5)}°)`);
+    return [cellA, cellB];
+  }
+}
+
+const MAX_GRID_DEPTH = 6; // prevent infinite recursion
+
+/**
+ * Recursively search a grid cell. If the API returns exactly 60 results
+ * (the maximum), the cell is split in half and each half is searched again.
+ * All results are collected and returned.
+ */
+async function searchGridCellRecursive(
+  cell: GridCell,
+  stadt: string,
+  branche: string,
+  sendProgress: (data: any) => Promise<void>,
+  shouldAbort: () => boolean,
+  depth: number = 0,
+): Promise<Place[]> {
+  const indent = '  '.repeat(depth);
+  if (shouldAbort()) {
+    logger.log(`[Rekursiv]${indent} ${cell.label} – Abbruch (Session cancelled)`);
+    return [];
+  }
+
+  logger.log(`[Rekursiv]${indent} ▶ Suche ${cell.label} (Tiefe ${depth}/${MAX_GRID_DEPTH})`);
+  logger.log(`[Rekursiv]${indent}   Bereich: lat [${cell.low.latitude.toFixed(5)} → ${cell.high.latitude.toFixed(5)}] lng [${cell.low.longitude.toFixed(5)} → ${cell.high.longitude.toFixed(5)}]`);
+  await sendProgress({
+    type: 'progress',
+    message: `[Grid] Suche ${cell.label}${depth > 0 ? ` (Tiefe ${depth})` : ''}`,
+  });
+
+  const startTime = Date.now();
+  const places = await searchPlaces(
+    stadt,
+    branche,
+    undefined, // no max – we want to know the true count
+    sendProgress,
+    shouldAbort,
+    { rectangle: { low: cell.low, high: cell.high } },
+  );
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+  logger.log(`[Rekursiv]${indent} ◀ ${cell.label}: ${places.length} Ergebnisse in ${elapsed}s`);
+
+  // If we got exactly 60 results (API max) and haven't gone too deep, subdivide
+  if (places.length >= 60 && depth < MAX_GRID_DEPTH) {
+    logger.log(`[Rekursiv]${indent} ⚠ ${cell.label} hat ${places.length} Ergebnisse (API-Maximum erreicht!) → Unterteilung in 2 Hälften (Tiefe ${depth} → ${depth + 1})`);
+    await sendProgress({
+      type: 'progress',
+      message: `[Grid] ${cell.label} hat ${places.length} Ergebnisse (Maximum) – wird geteilt (Tiefe ${depth + 1})`,
+    });
+
+    const [cellA, cellB] = splitCellInHalf(cell);
+    logger.log(`[Rekursiv]${indent} Starte parallele Suche: ${cellA.label} + ${cellB.label}`);
+    const [placesA, placesB] = await Promise.all([
+      searchGridCellRecursive(cellA, stadt, branche, sendProgress, shouldAbort, depth + 1),
+      searchGridCellRecursive(cellB, stadt, branche, sendProgress, shouldAbort, depth + 1),
+    ]);
+
+    const combined = [...placesA, ...placesB];
+    logger.log(`[Rekursiv]${indent} ✓ ${cell.label} Unterteilung fertig: ${cellA.label}=${placesA.length} + ${cellB.label}=${placesB.length} = ${combined.length} gesamt (vor Dedup)`);
+    return combined;
+  }
+
+  if (places.length >= 60 && depth >= MAX_GRID_DEPTH) {
+    logger.log(`[Rekursiv]${indent} ⚠ ${cell.label} hat ${places.length} Ergebnisse (API-Max), aber max. Tiefe ${MAX_GRID_DEPTH} erreicht – keine weitere Unterteilung`);
+  } else {
+    logger.log(`[Rekursiv]${indent} ✓ ${cell.label}: ${places.length} Ergebnisse (unter API-Max, keine Unterteilung nötig)`);
+  }
+  return places;
+}
+
+// ── Places Search ───────────────────────────────────────────────────────────
+
 async function searchPlaces(
   stadt: string,
   branche: string,
   maxBusinesses?: number,
   sendProgress?: (data: any) => Promise<void>,
   shouldAbort?: () => boolean,
+  locationRestriction?: { rectangle: { low: { latitude: number; longitude: number }; high: { latitude: number; longitude: number } } },
 ): Promise<Place[]> {
   const query = `${branche} in ${stadt}`;
   logger.log(`📍 Calling Google Places API with query: "${query}"`);
@@ -835,6 +1137,9 @@ async function searchPlaces(
     // ──────────────────────────────────
 
     const requestBody: any = { textQuery: query };
+    if (locationRestriction) {
+      requestBody.locationRestriction = locationRestriction;
+    }
     if (pageToken) {
       requestBody.pageToken = pageToken;
     }
