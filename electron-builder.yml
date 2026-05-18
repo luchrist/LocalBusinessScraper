@@ -1,4 +1,4 @@
-appId: com.autosetter.app
+appId: de.autosetter.app
 productName: Autosetter
 copyright: Copyright © 2026
 
@@ -31,6 +31,12 @@ npmRebuild: false
 mac:
   category: public.app-category.productivity
   icon: build-resources/icon.icns
+  identity: "Luca Christ (MWFF75AP4S)"
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build-resources/entitlements.mac.plist
+  entitlementsInherit: build-resources/entitlements.mac.plist
+  notarize: true
   target:
     - target: dmg
       arch:
