@@ -506,6 +506,11 @@ export async function POST(request: NextRequest) {
                   searchCount, totalSearches,
                 });
 
+                // Shared set across all grid cells – tracks seen place IDs so the
+                // recursive subdivision can detect when the API returns duplicates
+                // from neighbouring cells (= no point splitting further).
+                const gridSeenIds = new Set<string>();
+
                 // Search each grid cell recursively (subdivides when hitting 60 results)
                 let cellIdx = 0;
                 for (const cell of gridCells) {
@@ -519,9 +524,11 @@ export async function POST(request: NextRequest) {
                   const cellPlaces = await searchGridCellRecursive(
                     cell, stadt, branche, sendProgress,
                     () => isSessionCancelled(db, sessionId),
+                    0,
+                    gridSeenIds,
                   );
                   allPlacesRaw.push(...cellPlaces);
-                  logger.log(`[Grid] ${cell.label} fertig: ${cellPlaces.length} Ergebnisse | Gesamt bisher: ${allPlacesRaw.length} (vorher: ${beforeCount})`);
+                  logger.log(`[Grid] ${cell.label} fertig: ${cellPlaces.length} Ergebnisse | Gesamt bisher: ${allPlacesRaw.length} (vorher: ${beforeCount}) | Unique IDs gesamt: ${gridSeenIds.size}`);
                 }
 
                 logger.log(`[Grid] ── Grid-Suche abgeschlossen für "${branche}" in "${stadt}" ──`);
@@ -924,7 +931,7 @@ function stufeToGrid(stufe: number): number {
 }
 
 /**
- * Split a bounding box into a grid of cells with ~10% overlap.
+ * Split a bounding box into a grid of cells (no overlap).
  * Uses stufeToGrid to determine the grid dimensions.
  */
 function splitBoundingBox(bbox: BoundingBox, stufe: number): GridCell[] {
@@ -941,20 +948,16 @@ function splitBoundingBox(bbox: BoundingBox, stufe: number): GridCell[] {
   const cellHeight = latRange / rows;
   const cellWidth = lngRange / cols;
 
-  // 10% overlap on each side
-  const latOverlap = cellHeight * 0.1;
-  const lngOverlap = cellWidth * 0.1;
-
   const cells: GridCell[] = [];
   let cellNum = 0;
 
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
       cellNum++;
-      const south = bbox.south + row * cellHeight - latOverlap;
-      const north = bbox.south + (row + 1) * cellHeight + latOverlap;
-      const west = bbox.west + col * cellWidth - lngOverlap;
-      const east = bbox.west + (col + 1) * cellWidth + lngOverlap;
+      const south = bbox.south + row * cellHeight;
+      const north = bbox.south + (row + 1) * cellHeight;
+      const west = bbox.west + col * cellWidth;
+      const east = bbox.west + (col + 1) * cellWidth;
 
       cells.push({
         low: { latitude: south, longitude: west },
@@ -968,8 +971,7 @@ function splitBoundingBox(bbox: BoundingBox, stufe: number): GridCell[] {
 }
 
 /**
- * Split a single grid cell in half along its longer dimension.
- * Returns two cells with 10% overlap.
+ * Split a single grid cell in half along its longer dimension (no overlap).
  */
 function splitCellInHalf(cell: GridCell): [GridCell, GridCell] {
   const latRange = cell.high.latitude - cell.low.latitude;
@@ -981,47 +983,52 @@ function splitCellInHalf(cell: GridCell): [GridCell, GridCell] {
 
   if (latRange >= lngRange) {
     const mid = cell.low.latitude + latRange / 2;
-    const overlap = latRange * 0.05;
     const cellA: GridCell = {
       low: { latitude: cell.low.latitude, longitude: cell.low.longitude },
-      high: { latitude: mid + overlap, longitude: cell.high.longitude },
+      high: { latitude: mid, longitude: cell.high.longitude },
       label: cell.label + 'a',
     };
     const cellB: GridCell = {
-      low: { latitude: mid - overlap, longitude: cell.low.longitude },
+      low: { latitude: mid, longitude: cell.low.longitude },
       high: { latitude: cell.high.latitude, longitude: cell.high.longitude },
       label: cell.label + 'b',
     };
     logger.log(`[Split]   ${cellA.label}: lat [${cellA.low.latitude.toFixed(5)} → ${cellA.high.latitude.toFixed(5)}]`);
     logger.log(`[Split]   ${cellB.label}: lat [${cellB.low.latitude.toFixed(5)} → ${cellB.high.latitude.toFixed(5)}]`);
-    logger.log(`[Split]   Overlap-Zone: ${(mid - overlap).toFixed(5)} → ${(mid + overlap).toFixed(5)} (${(overlap * 2).toFixed(5)}°)`);
     return [cellA, cellB];
   } else {
     const mid = cell.low.longitude + lngRange / 2;
-    const overlap = lngRange * 0.05;
     const cellA: GridCell = {
       low: { latitude: cell.low.latitude, longitude: cell.low.longitude },
-      high: { latitude: cell.high.latitude, longitude: mid + overlap },
+      high: { latitude: cell.high.latitude, longitude: mid },
       label: cell.label + 'a',
     };
     const cellB: GridCell = {
-      low: { latitude: cell.low.latitude, longitude: mid - overlap },
+      low: { latitude: cell.low.latitude, longitude: mid },
       high: { latitude: cell.high.latitude, longitude: cell.high.longitude },
       label: cell.label + 'b',
     };
     logger.log(`[Split]   ${cellA.label}: lng [${cellA.low.longitude.toFixed(5)} → ${cellA.high.longitude.toFixed(5)}]`);
     logger.log(`[Split]   ${cellB.label}: lng [${cellB.low.longitude.toFixed(5)} → ${cellB.high.longitude.toFixed(5)}]`);
-    logger.log(`[Split]   Overlap-Zone: ${(mid - overlap).toFixed(5)} → ${(mid + overlap).toFixed(5)} (${(overlap * 2).toFixed(5)}°)`);
     return [cellA, cellB];
   }
 }
 
-const MAX_GRID_DEPTH = 6; // prevent infinite recursion
+const MAX_GRID_DEPTH = 3; // max recursive subdivisions (was 6 – caused exponential API cost)
 
 /**
  * Recursively search a grid cell. If the API returns exactly 60 results
  * (the maximum), the cell is split in half and each half is searched again.
- * All results are collected and returned.
+ *
+ * Two ID sets control the duplicate detection:
+ *  - globalSeenIds: ALL place IDs seen across all grid cells & depths.
+ *  - parentIds:     IDs returned by the parent cell (that was split to create this one).
+ *
+ * After each API call we check: does any returned ID exist in globalSeenIds
+ * but NOT in parentIds? If yes → the API is returning places from a completely
+ * different area (not our parent's area). That means locationRestriction is
+ * being ignored → stop subdividing immediately.
+ * Duplicates that ARE in parentIds are expected (parent contained them too).
  */
 async function searchGridCellRecursive(
   cell: GridCell,
@@ -1030,7 +1037,11 @@ async function searchGridCellRecursive(
   sendProgress: (data: any) => Promise<void>,
   shouldAbort: () => boolean,
   depth: number = 0,
+  globalSeenIds?: Set<string>,
+  parentIds?: Set<string>,
 ): Promise<Place[]> {
+  if (!globalSeenIds) globalSeenIds = new Set();
+  if (!parentIds) parentIds = new Set();
   const indent = '  '.repeat(depth);
   if (shouldAbort()) {
     logger.log(`[Rekursiv]${indent} ${cell.label} – Abbruch (Session cancelled)`);
@@ -1055,7 +1066,24 @@ async function searchGridCellRecursive(
   );
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
+  // Check for foreign duplicates: IDs we've seen globally but NOT in our parent.
+  // These come from a completely different grid area → API ignores the rectangle.
+  const foreignDup = places.find(p => globalSeenIds!.has(p.id) && !parentIds!.has(p.id));
+
+  // Register all IDs from this cell globally
+  const thisIds = new Set(places.map(p => p.id));
+  for (const id of thisIds) globalSeenIds.add(id);
+
   logger.log(`[Rekursiv]${indent} ◀ ${cell.label}: ${places.length} Ergebnisse in ${elapsed}s`);
+
+  if (foreignDup) {
+    logger.log(`[Rekursiv]${indent} ⛔ ${cell.label}: Ergebnis "${foreignDup.name}" (${foreignDup.id}) kommt aus fremdem Grid-Bereich – API ignoriert locationRestriction → Subdivision gestoppt`);
+    await sendProgress({
+      type: 'progress',
+      message: `[Grid] ${cell.label}: API liefert Ergebnisse aus anderem Bereich – keine weitere Unterteilung`,
+    });
+    return places;
+  }
 
   // If we got exactly 60 results (API max) and haven't gone too deep, subdivide
   if (places.length >= 60 && depth < MAX_GRID_DEPTH) {
@@ -1068,12 +1096,48 @@ async function searchGridCellRecursive(
     const [cellA, cellB] = splitCellInHalf(cell);
     logger.log(`[Rekursiv]${indent} Starte parallele Suche: ${cellA.label} + ${cellB.label}`);
     const [placesA, placesB] = await Promise.all([
-      searchGridCellRecursive(cellA, stadt, branche, sendProgress, shouldAbort, depth + 1),
-      searchGridCellRecursive(cellB, stadt, branche, sendProgress, shouldAbort, depth + 1),
+      searchGridCellRecursive(cellA, stadt, branche, sendProgress, shouldAbort, depth + 1, globalSeenIds, thisIds),
+      searchGridCellRecursive(cellB, stadt, branche, sendProgress, shouldAbort, depth + 1, globalSeenIds, thisIds),
     ]);
 
+    // ── Post-subdivision checks ──────────────────────────────────────────
+    // We always keep the children's results (they may contain new leads),
+    // but we decide whether FURTHER subdivision is worthwhile.
+
     const combined = [...placesA, ...placesB];
-    logger.log(`[Rekursiv]${indent} ✓ ${cell.label} Unterteilung fertig: ${cellA.label}=${placesA.length} + ${cellB.label}=${placesB.length} = ${combined.length} gesamt (vor Dedup)`);
+    const idsA = new Set(placesA.map(p => p.id));
+    const idsB = new Set(placesB.map(p => p.id));
+
+    // 1) Check overlap between the two children: if they share places,
+    //    the API is handing out the same results regardless of rectangle.
+    //    → Keep all results but mark depth as exhausted so children won't recurse further.
+    const sharedCount = placesA.filter(p => idsB.has(p.id)).length;
+    if (sharedCount > 0) {
+      logger.log(`[Rekursiv]${indent} ⚠ Kind-Zellen ${cellA.label} & ${cellB.label} teilen sich ${sharedCount} Places – API ignoriert Rectangle → Ergebnisse behalten, aber nicht weiter teilen`);
+      await sendProgress({
+        type: 'progress',
+        message: `[Grid] ${cell.label}: Kind-Zellen haben ${sharedCount} gemeinsame Ergebnisse – nicht weiter teilen`,
+      });
+      return combined;
+    }
+
+    // 2) Check how many NEW unique IDs the children found vs. the parent.
+    //    → Always keep the results, but if <20% new, don't recurse deeper.
+    const combinedIds = new Set([...idsA, ...idsB]);
+    const newFromChildren = [...combinedIds].filter(id => !thisIds.has(id)).length;
+    const newPct = thisIds.size > 0 ? Math.round((newFromChildren / thisIds.size) * 100) : 0;
+    logger.log(`[Rekursiv]${indent} Subdivision-Ergebnis: ${combinedIds.size} unique IDs aus Kindern, davon ${newFromChildren} neu vs. Parent (${newPct}%)`);
+
+    if (newPct < 20) {
+      logger.log(`[Rekursiv]${indent} ⚠ Subdivision brachte nur ${newPct}% neue Leads vs. Parent – Ergebnisse behalten, aber nicht weiter teilen`);
+      await sendProgress({
+        type: 'progress',
+        message: `[Grid] ${cell.label}: Unterteilung brachte nur ${newPct}% neue Leads – nicht weiter teilen`,
+      });
+      return combined;
+    }
+
+    logger.log(`[Rekursiv]${indent} ✓ ${cell.label} Unterteilung lohnt sich: ${newFromChildren} neue Leads (+${newPct}%) | ${cellA.label}=${placesA.length} + ${cellB.label}=${placesB.length} = ${combined.length} gesamt (vor Dedup)`);
     return combined;
   }
 
@@ -1095,8 +1159,12 @@ async function searchPlaces(
   shouldAbort?: () => boolean,
   locationRestriction?: { rectangle: { low: { latitude: number; longitude: number }; high: { latitude: number; longitude: number } } },
 ): Promise<Place[]> {
-  const query = `${branche} in ${stadt}`;
-  logger.log(`📍 Calling Google Places API with query: "${query}"`);
+  // When using locationRestriction (grid search), omit "in {stadt}" from the query
+  // so the API respects the rectangle as the sole geographic filter.
+  // Including "in München" in the query overrides the rectangle and always returns
+  // the same top-60 results for the whole city.
+  const query = locationRestriction ? branche : `${branche} in ${stadt}`;
+  logger.log(`📍 Calling Google Places API with query: "${query}"${locationRestriction ? ' (grid-restricted)' : ''}`);
   
   const url = 'https://places.googleapis.com/v1/places:searchText';
   let allPlaces: Place[] = [];
