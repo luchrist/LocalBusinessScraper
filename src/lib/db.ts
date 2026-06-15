@@ -44,6 +44,7 @@ export interface JobRow {
   stadt: string;
   branche: string;
   max_results: number | null;
+  stufe: number;
   status: JobStatus;
   started_at: number | null;
 }
@@ -120,6 +121,7 @@ export function openDb(sessionId: string): Database.Database {
       stadt       TEXT NOT NULL,
       branche     TEXT NOT NULL,
       max_results INTEGER,
+      stufe       INTEGER NOT NULL DEFAULT 0,
       status      TEXT NOT NULL DEFAULT 'pending',
       started_at  INTEGER
     );
@@ -155,6 +157,7 @@ export function openDb(sessionId: string): Database.Database {
 
   // Migration: add max_results column to existing DBs
   try { db.exec(`ALTER TABLE jobs ADD COLUMN max_results INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE jobs ADD COLUMN stufe INTEGER NOT NULL DEFAULT 0`); } catch {}
   try { db.exec(`ALTER TABLE places ADD COLUMN price TEXT`); } catch {}
   try { db.exec(`ALTER TABLE sessions ADD COLUMN min_price INTEGER`); } catch {}
   try { db.exec(`ALTER TABLE sessions ADD COLUMN max_price INTEGER`); } catch {}
@@ -237,14 +240,14 @@ export function getSession(db: Database.Database, sessionId: string): SessionRow
 
 // ─── Job helpers ──────────────────────────────────────────────────────────────
 
-export function insertJobs(db: Database.Database, sessionId: string, rows: { stadt: string; branche: string; max_results?: number | null }[]): void {
+export function insertJobs(db: Database.Database, sessionId: string, rows: { stadt: string; branche: string; max_results?: number | null; stufe?: number | null }[]): void {
   const stmt = db.prepare(`
-    INSERT INTO jobs (id, session_id, stadt, branche, max_results, status)
-    VALUES (?, ?, ?, ?, ?, 'pending')
+    INSERT INTO jobs (id, session_id, stadt, branche, max_results, stufe, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending')
   `);
   const insertMany = db.transaction((jobs: typeof rows) => {
     for (const job of jobs) {
-      stmt.run(crypto.randomBytes(6).toString('hex'), sessionId, job.stadt, job.branche, job.max_results ?? null);
+      stmt.run(crypto.randomBytes(6).toString('hex'), sessionId, job.stadt, job.branche, job.max_results ?? null, job.stufe ?? 0);
     }
   });
   insertMany(rows);
@@ -257,13 +260,13 @@ export function insertJobs(db: Database.Database, sessionId: string, rows: { sta
 export function insertSingleJob(
   db: Database.Database,
   sessionId: string,
-  job: { stadt: string; branche: string; max_results?: number | null }
+  job: { stadt: string; branche: string; max_results?: number | null; stufe?: number | null }
 ): string {
   const id = crypto.randomBytes(6).toString('hex');
   db.prepare(`
-    INSERT INTO jobs (id, session_id, stadt, branche, max_results, status)
-    VALUES (?, ?, ?, ?, ?, 'running')
-  `).run(id, sessionId, job.stadt, job.branche, job.max_results ?? null);
+    INSERT INTO jobs (id, session_id, stadt, branche, max_results, stufe, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'running')
+  `).run(id, sessionId, job.stadt, job.branche, job.max_results ?? null, job.stufe ?? 0);
   return id;
 }
 
@@ -481,7 +484,11 @@ export function hasUnfinishedWork(db: Database.Database, sessionId: string): boo
 
 // ─── Session list (for resume UI) ────────────────────────────────────────────
 
-export function listSessions(): { id: string; path: string; created_at: number; status: string; total_jobs: number; worker_count: number }[] {
+type ListedSession = { id: string; path: string; created_at: number; status: string; total_jobs: number; worker_count: number };
+type SessionListRow = Omit<ListedSession, 'path'>;
+type CountRow = { c: number };
+
+export function listSessions(): ListedSession[] {
   const dir = process.env.ELECTRON_DATA_DIR ?? path.join(process.cwd(), 'scraper-data');
   if (!fs.existsSync(dir)) return [];
 
@@ -494,10 +501,10 @@ export function listSessions(): { id: string; path: string; created_at: number; 
         // If already open (active), use it
         if (dbCache.has(id)) {
           const db = dbCache.get(id)!;
-          const session = db.prepare(`SELECT id, created_at, status, total_jobs, worker_count FROM sessions WHERE id = ?`).get(id) as any;
+          const session = db.prepare(`SELECT id, created_at, status, total_jobs, worker_count FROM sessions WHERE id = ?`).get(id) as SessionListRow | undefined;
           if (session) {
              const countFn = db.prepare('SELECT COUNT(*) as c FROM places WHERE session_id = ?');
-             const count = (countFn.get(id) as any).c;
+             const count = (countFn.get(id) as CountRow).c;
              return { ...session, total_jobs: count, path: fullPath };
           }
           return null;
@@ -505,10 +512,10 @@ export function listSessions(): { id: string; path: string; created_at: number; 
 
         // Open read-only to check status without modifying cache
         const db = new Database(fullPath, { readonly: true });
-        const session = db.prepare(`SELECT id, created_at, status, total_jobs, worker_count FROM sessions WHERE id = ?`).get(id) as any;
+        const session = db.prepare(`SELECT id, created_at, status, total_jobs, worker_count FROM sessions WHERE id = ?`).get(id) as SessionListRow | undefined;
         if (session) {
              const countFn = db.prepare('SELECT COUNT(*) as c FROM places WHERE session_id = ?');
-             const count = (countFn.get(id) as any).c;
+             const count = (countFn.get(id) as CountRow).c;
              db.close();
              return { ...session, total_jobs: count, path: fullPath };
         }
@@ -516,15 +523,14 @@ export function listSessions(): { id: string; path: string; created_at: number; 
         return null;
       } catch { return null; }
     })
-    .filter(Boolean) as any[];
+    .filter((session): session is ListedSession => session !== null);
 }
 
-export function getAllPlaces(db: Database.Database, sessionId: string): any[] {
+export function getAllPlaces(db: Database.Database, sessionId: string): ClaimedPlaceRow[] {
   return db.prepare(`
     SELECT p.*, j.stadt, j.branche
     FROM places p
     JOIN jobs j ON j.id = p.job_id
     WHERE p.session_id = ?
-  `).all(sessionId);
+  `).all(sessionId) as ClaimedPlaceRow[];
 }
-

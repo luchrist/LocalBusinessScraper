@@ -86,6 +86,10 @@ export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
+  const runAbortController = new AbortController();
+  let activeBrowser: Browser | null = null;
+  let activePool: ScraperPool | null = null;
+  let activeSessionId: string | null = null;
   
   // Tracks only SSE connection state – does NOT stop enrichment.
   // Enrichment uses the DB cancelled flag instead (see isSessionCancelled).
@@ -93,6 +97,9 @@ export async function POST(request: NextRequest) {
   request.signal.addEventListener('abort', () => {
       logger.log('⚠️ Client disconnected (sleep / tab close / explicit cancel)');
       clientDisconnected = true;
+      runAbortController.abort();
+      void activePool?.close().catch(() => {});
+      void activeBrowser?.close().catch(() => {});
   });
 
   const sendProgress = async (data: any) => {
@@ -215,6 +222,7 @@ export async function POST(request: NextRequest) {
 
       // SQLite session – scraping results written to disk immediately, never piling up in RAM
       const sessionId = newSessionId();
+      activeSessionId = sessionId;
       const db = openDb(sessionId);
       createSession(db, {
         sessionId,
@@ -242,6 +250,7 @@ export async function POST(request: NextRequest) {
           '--disable-extensions'
         ]
       });
+      activeBrowser = browser;
 
       // OPTIMIZATION: Context recreation function to prevent Memory/BFCache bloat
       const createEnrichmentContext = async () => {
@@ -286,6 +295,7 @@ export async function POST(request: NextRequest) {
       const hasScrapingRows = data.some(row => (row.max_results ?? maxBusinesses) > 60);
       const workerCount = 1; // Always 1 Maps scraper worker since scraping is not done in parallel globally
       const pool = new ScraperPool();
+      activePool = pool;
       if (hasScrapingRows) {
         logger.log(`[Pool] ${workerCount} Maps worker(s) initialised – some rows will use scraping`);
         await pool.initialize(workerCount);
@@ -416,6 +426,10 @@ export async function POST(request: NextRequest) {
               current: processedBusinesses, total: totalBusinessesFound,
             });
           } catch (err) {
+            if (runAbortController.signal.aborted || isSessionCancelled(db, sessionId)) {
+              logger.log('[Enrichment] Cancellation detected during worker iteration – stopping worker.');
+              break;
+            }
             // Catch unexpected errors (e.g. browser crash) so a single failed
             // iteration doesn't silently kill the whole poller.
             logger.error('[Enrichment] Worker iteration error – retrying in 1s:', err);
@@ -477,7 +491,7 @@ export async function POST(request: NextRequest) {
           if (isApi) {
             // ── API PATH (with optional adaptive grid splitting) ────────────────
             const jobMax = effectiveMax === Infinity ? null : effectiveMax;
-            const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: jobMax });
+            const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: jobMax, stufe });
 
             let allPlacesRaw: Place[] = [];
 
@@ -523,7 +537,8 @@ export async function POST(request: NextRequest) {
                   const beforeCount = allPlacesRaw.length;
                   const cellPlaces = await searchGridCellRecursive(
                     cell, stadt, branche, sendProgress,
-                    () => isSessionCancelled(db, sessionId),
+                    () => isSessionCancelled(db, sessionId) || runAbortController.signal.aborted,
+                    runAbortController.signal,
                     0,
                     gridSeenIds,
                   );
@@ -538,7 +553,9 @@ export async function POST(request: NextRequest) {
                 logger.log(`[Grid] Fallback: Einzelsuche ohne Grid`);
                 allPlacesRaw = await searchPlaces(
                   stadt, branche, effectiveMax, sendProgress,
-                  () => isSessionCancelled(db, sessionId),
+                  () => isSessionCancelled(db, sessionId) || runAbortController.signal.aborted,
+                  undefined,
+                  runAbortController.signal,
                 );
                 logger.log(`[Grid] Fallback-Ergebnis: ${allPlacesRaw.length} Ergebnisse`);
               }
@@ -546,7 +563,9 @@ export async function POST(request: NextRequest) {
               // Single search without grid
               allPlacesRaw = await searchPlaces(
                 stadt, branche, effectiveMax, sendProgress,
-                () => isSessionCancelled(db, sessionId),
+                () => isSessionCancelled(db, sessionId) || runAbortController.signal.aborted,
+                undefined,
+                runAbortController.signal,
               );
             }
 
@@ -636,7 +655,7 @@ export async function POST(request: NextRequest) {
           }          return;        } else {
           // ── SCRAPING PATH ──────────────────────────────────────────────────
           // Create a job row in SQLite so place FK is satisfied
-          const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results });
+          const jobId = insertSingleJob(db, sessionId, { stadt, branche, max_results: row.max_results, stufe });
           
           let retryPlaceName: string | undefined = undefined;
           let isSecondAttempt = false;
@@ -810,12 +829,14 @@ export async function POST(request: NextRequest) {
       if (hasScrapingRows && !poolClosed) {
         logger.log('[Pool] All tasks finished. Shutting down Maps worker pool to free RAM.');
         await pool.close();
+        activePool = null;
       }
 
       updateSessionTotalJobs(db, sessionId, processedBusinesses);
       closeDb(sessionId);
 
       await browser.close();
+      activeBrowser = null;
 
       logger.log(`🎉 Scraping completed successfully. Total results: ${processedBusinesses}`);
 
@@ -833,6 +854,11 @@ export async function POST(request: NextRequest) {
       });
     } finally {
       logger.log('🏁 Scrape route execution finished, cleaning up resources...');
+      await activePool?.close().catch(() => {});
+      await activeBrowser?.close().catch(() => {});
+      if (activeSessionId) {
+        try { closeDb(activeSessionId); } catch {}
+      }
       await shutdownWorker(); // Destroy LLM worker to avoid memory leaks
       await writer.close();
     }
@@ -857,6 +883,23 @@ async function runWithLimit(tasks: (() => Promise<void>)[], limit: number) {
         }
     }
     await Promise.all(Array(limit).fill(0).map(worker));
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 // ── Grid Search Helpers ─────────────────────────────────────────────────────
@@ -1036,6 +1079,7 @@ async function searchGridCellRecursive(
   branche: string,
   sendProgress: (data: any) => Promise<void>,
   shouldAbort: () => boolean,
+  abortSignal?: AbortSignal,
   depth: number = 0,
   globalSeenIds?: Set<string>,
   parentIds?: Set<string>,
@@ -1063,6 +1107,7 @@ async function searchGridCellRecursive(
     sendProgress,
     shouldAbort,
     { rectangle: { low: cell.low, high: cell.high } },
+    abortSignal,
   );
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
@@ -1096,8 +1141,8 @@ async function searchGridCellRecursive(
     const [cellA, cellB] = splitCellInHalf(cell);
     logger.log(`[Rekursiv]${indent} Starte parallele Suche: ${cellA.label} + ${cellB.label}`);
     const [placesA, placesB] = await Promise.all([
-      searchGridCellRecursive(cellA, stadt, branche, sendProgress, shouldAbort, depth + 1, globalSeenIds, thisIds),
-      searchGridCellRecursive(cellB, stadt, branche, sendProgress, shouldAbort, depth + 1, globalSeenIds, thisIds),
+      searchGridCellRecursive(cellA, stadt, branche, sendProgress, shouldAbort, abortSignal, depth + 1, globalSeenIds, thisIds),
+      searchGridCellRecursive(cellB, stadt, branche, sendProgress, shouldAbort, abortSignal, depth + 1, globalSeenIds, thisIds),
     ]);
 
     // ── Post-subdivision checks ──────────────────────────────────────────
@@ -1158,6 +1203,7 @@ async function searchPlaces(
   sendProgress?: (data: any) => Promise<void>,
   shouldAbort?: () => boolean,
   locationRestriction?: { rectangle: { low: { latitude: number; longitude: number }; high: { latitude: number; longitude: number } } },
+  abortSignal?: AbortSignal,
 ): Promise<Place[]> {
   // When using locationRestriction (grid search), omit "in {stadt}" from the query
   // so the API respects the rectangle as the sole geographic filter.
@@ -1199,7 +1245,7 @@ async function searchPlaces(
             message: 'Das Limit von 1000 Aufrufen pro API Key wurde erreicht. Bitte neue Keys in den Einstellungen hinzufügen.'
           });
         }
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await abortableDelay(5000, abortSignal);
       }
     }
     // ──────────────────────────────────
@@ -1216,6 +1262,7 @@ async function searchPlaces(
 
     const response = await fetch(url, {
       method: 'POST',
+      signal: abortSignal,
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
@@ -1267,7 +1314,7 @@ async function searchPlaces(
 
     // Small delay between requests to avoid rate limiting
     if (pageToken) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await abortableDelay(500, abortSignal);
     }
   } while (pageToken && (!maxBusinesses || allPlaces.length < maxBusinesses) && !shouldAbort?.());
 

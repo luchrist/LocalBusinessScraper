@@ -438,15 +438,17 @@ export default function BusinessScraper() {
     }
   };
 
-  const cancelScraping = () => {
+  const cancelScraping = async () => {
     userCancelledRef.current = true;
     // Tell the server to mark the session as cancelled in the DB (stops enrichment workers).
     if (sessionId) {
-      fetch('/api/scrape/cancel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
-      }).catch(() => {});
+      try {
+        await fetch('/api/scrape/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId }),
+        });
+      } catch {}
     }
     // Abort the SSE stream so the client stops receiving events.
     if (abortController) {
