@@ -1,3 +1,4 @@
+import { requireLicense } from '@/lib/app-license';
 import { NextRequest, NextResponse } from 'next/server';
 import { chromium } from 'playwright';
 
@@ -75,6 +76,7 @@ function isEmailFromDomain(email: string, expectedDomain: string, strictMode: bo
 }
 
 export async function POST(request: NextRequest) {
+  try { await requireLicense(); } catch { return NextResponse.json({ error: 'Bitte aktiviere zuerst deine Lizenz.' }, { status:403 }); }
   try {
     const { url } = await request.json();
 

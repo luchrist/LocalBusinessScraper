@@ -1,0 +1,11 @@
+AutoSetter
+
+macOS: AutoSetter.app in den Programme-Ordner ziehen.
+Windows: Installer starten und den Schritten folgen.
+
+Nach dem Start den gekauften Lizenzschlüssel eingeben.
+Google-Places-API-Schlüssel bei Bedarf unter Einstellungen hinterlegen.
+Die optionale lokale KI benötigt ein GGUF-Modell; dieses kann in den Einstellungen eingerichtet werden.
+Für die Aktivierung und Recherchen ist Internet erforderlich.
+
+Laufende Recherchen halten Bildschirm und System wach. Notebook am Strom lassen und Deckel geöffnet halten.

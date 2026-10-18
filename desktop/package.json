@@ -1,0 +1,11 @@
+{
+  "name": "autosetter-desktop",
+  "productName": "AutoSetter",
+  "version": "0.2.0",
+  "main": "main.cjs",
+  "description": "AutoSetter local business research",
+  "author": {
+    "name": "Luca Christ",
+    "email": "luca@autosetter.de"
+  }
+}
