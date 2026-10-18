@@ -3,6 +3,7 @@ productName: AutoSetter
 copyright: Copyright © 2026 Luca Christ
 asar: true
 afterPack: desktop/after-pack.cjs
+afterSign: desktop/after-sign.cjs
 npmRebuild: false
 nodeGypRebuild: false
 directories:
