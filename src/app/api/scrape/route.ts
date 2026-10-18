@@ -1,3 +1,4 @@
+import { beginRun, RunError } from '@/lib/run-guard';
 //api/scrape
 import { logger } from '@/lib/logger';
 import os from 'os';
@@ -10,7 +11,7 @@ import { ScraperPool } from '@/lib/scraper-pool';
 import { shutdownWorker } from '@/lib/llm-extractor';
 import { getNextAvailableKey, incrementApiKeyUsage, initSettingsDb } from '@/lib/settings-db';
 import {
-  openDb, closeDb, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, hasUnfinishedWork, drainStreamable, isSessionCancelled,
+  openDb, closeDb, cancelSession, newSessionId, createSession, insertSingleJob, insertPlace, updatePlaceEnriched, updateSessionTotalJobs, claimNextPlace, hasPendingPlaces, hasUnfinishedWork, drainStreamable, isSessionCancelled,
   type EnrichStatus,
 } from '@/lib/db';
 
@@ -69,6 +70,10 @@ function getColumnValue(row: any, keys: string[]): string | undefined {
 }
 
 export async function POST(request: NextRequest) {
+  let releaseRun: () => void;
+  try { releaseRun = await beginRun(); }
+  catch (e) { return new Response(JSON.stringify({ error: e instanceof Error ? e.message : 'Start fehlgeschlagen.' }), { status: e instanceof RunError ? e.status : 503, headers: { 'Content-Type': 'application/json' } }); }
+
   // Initialize settings DB once requested
   try {
     initSettingsDb();
@@ -103,6 +108,11 @@ export async function POST(request: NextRequest) {
         clientDisconnected = true;
     }
   };
+
+  let cleanupBrowser: Browser | null = null;
+  let cleanupPool: ScraperPool | null = null;
+  let cleanupSession: string | null = null;
+  let completed = false;
 
   // Start processing in background
   (async () => {
@@ -213,6 +223,7 @@ export async function POST(request: NextRequest) {
       // SQLite session – scraping results written to disk immediately, never piling up in RAM
       const sessionId = newSessionId();
       const db = openDb(sessionId);
+      cleanupSession = sessionId;
       createSession(db, {
         sessionId,
         workerCount: 1, 
@@ -239,6 +250,8 @@ export async function POST(request: NextRequest) {
           '--disable-extensions'
         ]
       });
+
+      cleanupBrowser = browser;
 
       // OPTIMIZATION: Context recreation function to prevent Memory/BFCache bloat
       const createEnrichmentContext = async () => {
@@ -283,6 +296,7 @@ export async function POST(request: NextRequest) {
       const hasScrapingRows = data.some(row => (row.max_results ?? maxBusinesses) > 60);
       const workerCount = 1; // Always 1 Maps scraper worker since scraping is not done in parallel globally
       const pool = new ScraperPool();
+      cleanupPool = pool;
       if (hasScrapingRows) {
         logger.log(`[Pool] ${workerCount} Maps worker(s) initialised – some rows will use scraping`);
         await pool.initialize(workerCount);
@@ -735,6 +749,7 @@ export async function POST(request: NextRequest) {
 
       updateSessionTotalJobs(db, sessionId, processedBusinesses);
       closeDb(sessionId);
+      completed = true;
 
       await browser.close();
 
@@ -753,9 +768,16 @@ export async function POST(request: NextRequest) {
         message: error instanceof Error ? error.message : 'Unknown error occurred',
       });
     } finally {
+      if (!completed && cleanupSession) {
+        try { cancelSession(openDb(cleanupSession), cleanupSession); } catch {}
+      }
+      await cleanupPool?.close().catch(() => {});
+      await cleanupBrowser?.close().catch(() => {});
+      if (cleanupSession) closeDb(cleanupSession);
       logger.log('🏁 Scrape route execution finished, cleaning up resources...');
-      await shutdownWorker(); // Destroy LLM worker to avoid memory leaks
-      await writer.close();
+      await shutdownWorker().catch(() => {}); // Destroy LLM worker to avoid memory leaks
+      releaseRun();
+      try { await writer.close(); } catch { /* disconnected */ }
     }
   })();
 
@@ -812,6 +834,7 @@ async function searchPlaces(
     // ─── Key Management logic added ───
     let apiKey: string | null = null;
     while (!apiKey) {
+      if (shouldAbort?.()) return allPlaces;
       apiKey = getNextAvailableKey();
       if (!apiKey) {
         logger.warn('⏳ No active API keys available. Waiting for new keys...');

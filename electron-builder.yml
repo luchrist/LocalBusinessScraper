@@ -1,0 +1,52 @@
+appId: de.autosetter.desktop
+productName: AutoSetter
+copyright: Copyright © 2026 Luca Christ
+asar: true
+npmRebuild: false
+nodeGypRebuild: false
+directories:
+  app: desktop
+  output: release
+files:
+  - "*.cjs"
+  - package.json
+extraResources:
+  - from: .desktop/server
+    to: server
+    filter:
+      - '**/*'
+      - '!**/.env*'
+      - '!**/*.db*'
+      - '!**/logs/**'
+  - from: .desktop/runtime
+    to: runtime
+  - from: .desktop/browsers
+    to: browsers
+mac:
+  icon: desktop/icon.png
+  category: public.app-category.business
+  target: dmg
+  artifactName: Autosetter-macOS-${arch}.${ext}
+  hardenedRuntime: true
+  entitlements: desktop/entitlements.mac.plist
+  entitlementsInherit: desktop/entitlements.mac.plist
+  extraFiles:
+    - from: desktop/INSTALLATION.txt
+      to: INSTALLATION.txt
+win:
+  icon: desktop/icon.png
+  target: nsis
+  artifactName: Autosetter-Windows-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  perMachine: false
+linux:
+  icon: desktop/icon.png
+  category: Office
+  target:
+    - AppImage
+    - deb
+  artifactName: Autosetter-Linux-${arch}.${ext}
