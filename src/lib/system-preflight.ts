@@ -11,13 +11,17 @@ export async function systemPreflight(input: { leads: number; searches: number; 
   await new Promise(resolve => setTimeout(resolve, 650));
   const [memory, cpu, processes] = await Promise.all([si.mem(), si.currentLoad(), si.processes()]);
   const totalGb = memory.total / 1024 ** 3;
-  const availableGb = memory.available / 1024 ** 3;
-  const usedPercent = (1 - memory.available / memory.total) * 100;
+  // On macOS systeminformation's `available` also includes wired/compressed
+  // memory. Only free and inactive (reclaimable) pages can be budgeted safely.
+  const availableBytes = process.platform === 'darwin' ? memory.free + memory.reclaimable : memory.available;
+  const availableGb = Math.min(memory.total, availableBytes) / 1024 ** 3;
+  const usedPercent = (1 - Math.min(memory.total, availableBytes) / memory.total) * 100;
   const cpuPercent = Math.min(100, cpu.currentLoad);
   const busyProcesses = processes.list.filter(p => p.pid !== process.pid && (p.cpu > 8 || p.memRss > 768 * 1024))
     .sort((a,b) => b.cpu - a.cpu).slice(0,8).map(p => ({ name: p.name, cpu: Math.round(p.cpu), memoryMb: Math.round(p.memRss / 1024) }));
   const warnings: string[] = [];
   if (availableGb < 3 || usedPercent > 85) warnings.push('Es ist wenig Arbeitsspeicher frei. Schließe andere Programme und Browser-Tabs.');
+  if (memory.swapused > 1024 ** 3) warnings.push('Der Computer hat bereits Arbeitsspeicher ausgelagert. Schließe nicht benötigte Programme, bevor du eine große Recherche startest.');
   if (cpuPercent > 75) warnings.push('Dein Prozessor ist bereits stark ausgelastet. Beende andere rechenintensive Aufgaben.');
   if (busyProcesses.length >= 3) warnings.push('Mehrere andere Prozesse benötigen gerade viel Leistung oder RAM. Schließe möglichst alle anderen Programme.');
   const workers = Math.max(1, Math.min(input.workers || (totalGb > 16 ? 4 : totalGb > 8 ? 3 : 2), os.availableParallelism(), Math.max(1, Math.floor(availableGb / 1.5))));

@@ -2,6 +2,7 @@ appId: de.autosetter.desktop
 productName: AutoSetter
 copyright: Copyright © 2026 Luca Christ
 asar: true
+afterPack: desktop/after-pack.cjs
 npmRebuild: false
 nodeGypRebuild: false
 directories:

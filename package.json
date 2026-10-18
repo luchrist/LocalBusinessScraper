@@ -9,9 +9,10 @@
     "lint": "eslint",
     "desktop:prepare": "node scripts/prepare-desktop.mjs",
     "desktop:dev": "electron .",
-    "desktop:build": "npm run build && npm run desktop:prepare && electron-builder --publish never",
+    "desktop:build": "npm run build && npm run desktop:prepare && npm run desktop:package",
     "test": "node --import tsx --test tests/*.test.ts",
-    "desktop:smoke": "node scripts/smoke-desktop.mjs"
+    "desktop:smoke": "node scripts/smoke-desktop.mjs",
+    "desktop:package": "node scripts/package-desktop.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

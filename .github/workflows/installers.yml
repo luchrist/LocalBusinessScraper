@@ -32,7 +32,7 @@ jobs:
       - run: npm run build
       - run: npm run desktop:prepare
       - run: npm run desktop:smoke
-      - run: npx electron-builder ${{ matrix.target }} --publish never
+      - run: npm run desktop:package -- ${{ matrix.target }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
