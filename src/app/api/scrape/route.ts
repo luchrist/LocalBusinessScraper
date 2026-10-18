@@ -113,6 +113,7 @@ export async function POST(request: NextRequest) {
   let cleanupPool: ScraperPool | null = null;
   let cleanupSession: string | null = null;
   let completed = false;
+  let stopBackgroundWorkers = false;
 
   // Start processing in background
   (async () => {
@@ -322,7 +323,7 @@ export async function POST(request: NextRequest) {
       async function runEnrichmentPoller() {
         // Runs until natural DB completion or explicit session cancel.
         // Client disconnect (sleep / tab close) does NOT stop this loop.
-          while (true) {
+          while (!stopBackgroundWorkers) {
             let currentPlaceId: string | null = null;
             try {
               if (isSessionCancelled(db, sessionId)) {
@@ -768,6 +769,7 @@ export async function POST(request: NextRequest) {
         message: error instanceof Error ? error.message : 'Unknown error occurred',
       });
     } finally {
+      stopBackgroundWorkers = true;
       if (!completed && cleanupSession) {
         try { cancelSession(openDb(cleanupSession), cleanupSession); } catch {}
       }
