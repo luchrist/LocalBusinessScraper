@@ -19,6 +19,10 @@ extraResources:
       - '!**/.env*'
       - '!**/*.db*'
       - '!**/logs/**'
+  - from: .desktop/server/node_modules
+    to: server/node_modules
+    filter:
+      - "**/*"
   - from: .desktop/runtime
     to: runtime
   - from: .desktop/browsers
