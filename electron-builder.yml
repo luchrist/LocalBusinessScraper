@@ -38,7 +38,7 @@ mac:
   entitlementsInherit: desktop/entitlements.mac.plist
   extraFiles:
     - from: desktop/INSTALLATION.txt
-      to: INSTALLATION.txt
+      to: Resources/INSTALLATION.txt
 win:
   icon: desktop/icon.png
   target: nsis

@@ -10,5 +10,5 @@ const args=process.argv.slice(2);
 // Apple Silicon requires a valid bundle signature even for local test builds.
 // CI without a release certificate uses ad-hoc signing; local release builds
 // can discover the owner's Developer ID certificate as usual.
-if(process.platform==='darwin' && !env.CSC_LINK && (env.CI==='true' || env.CSC_IDENTITY_AUTO_DISCOVERY==='false'))args.push('-c.mac.identity=-');
+if(process.platform==='darwin' && !env.CSC_LINK && (env.CI==='true' || env.CSC_IDENTITY_AUTO_DISCOVERY==='false'))args.push('-c.mac.identity=-','-c.mac.timestamp=none');
 execFileSync(process.execPath,[path.join(process.cwd(),'node_modules/electron-builder/out/cli/cli.js'),...args,'--publish','never'],{stdio:'inherit',env});
