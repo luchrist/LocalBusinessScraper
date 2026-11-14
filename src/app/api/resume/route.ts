@@ -1,3 +1,4 @@
+import { beginRun, RunError } from '@/lib/run-guard';
 /**
  * /api/resume – Resume an interrupted scraping session.
  *
@@ -10,7 +11,7 @@
 
 import { logger } from '@/lib/logger';
 import { NextRequest } from 'next/server';
-import { chromium } from 'playwright';
+import { chromium, type Browser } from 'playwright';
 import { findContactInfo } from '@/lib/email-scraper';
 import { GoogleMapsScraper } from '@/lib/maps-scraper';
 import { ScraperPool } from '@/lib/scraper-pool';
@@ -18,13 +19,18 @@ import {
   openDb, closeDb, getSession, resetStaleJobs,
   claimNextJob, markJobDone, countJobs, updateSessionStatus,
   insertPlace, claimNextPlace, updatePlaceEnriched,
-  drainStreamable, countPlaces, hasPendingPlaces, getAllPlaces,
+  isSessionCancelled, drainStreamable, countPlaces, hasPendingPlaces, getAllPlaces,
   type EnrichStatus,
 } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
+  let releaseRun: () => void;
+  try { releaseRun = await beginRun(); }
+  catch (e) { return new Response(JSON.stringify({ error: e instanceof Error ? e.message : 'Start fehlgeschlagen.' }), { status: e instanceof RunError ? e.status : 503, headers: { 'Content-Type': 'application/json' } }); }
+
   const sessionId = request.nextUrl.searchParams.get('session');
-  if (!sessionId) {
+  if (!sessionId || !/^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
+    releaseRun();
     return new Response(JSON.stringify({ error: 'Missing session parameter' }), { status: 400 });
   }
 
@@ -41,6 +47,8 @@ export async function GET(request: NextRequest) {
     catch { isAborted = true; }
   };
 
+  let cleanupBrowser: Browser | null = null;
+  let cleanupPool: ScraperPool | null = null;
   (async () => {
     try {
       // ── Load session ────────────────────────────────────────────────────
@@ -77,6 +85,7 @@ export async function GET(request: NextRequest) {
         headless: true,
         args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
       });
+      cleanupBrowser = emailBrowser;
       const emailContext = await emailBrowser.newContext({
         userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
         viewport: { width: 1920, height: 1080 },
@@ -86,6 +95,7 @@ export async function GET(request: NextRequest) {
 
       // ── Maps browser pool ───────────────────────────────────────────────
       const pool = new ScraperPool();
+      cleanupPool = pool;
       await pool.initialize(1); // Force 1 Maps worker as scraping is no longer parallelized
       request.signal.addEventListener('abort', async () => {
         updateSessionStatus(db, sessionId, 'paused');
@@ -135,7 +145,7 @@ export async function GET(request: NextRequest) {
       const mapsWorkerLoop = async () => {
         let job;
         while ((job = claimNextJob(db, sessionId)) !== null) {
-          if (isAborted) break;
+          if (isAborted || isSessionCancelled(db, sessionId)) break;
           const { id: jobId, stadt, branche } = job;
           const worker = await pool.acquire();
           try {
@@ -159,7 +169,7 @@ export async function GET(request: NextRequest) {
             await scraper.search(stadt, branche);
 
             for await (const place of scraper.scrape(request.signal)) {
-              if (isAborted) break;
+              if (isAborted || isSessionCancelled(db, sessionId)) break;
               const placeKey = place.placeKey || `${place.name}|${place.address ?? ''}`;
               if (seenPlaceIds.has(placeKey)) continue;
               let domain: string | null = null;
@@ -191,7 +201,7 @@ export async function GET(request: NextRequest) {
       const enrichWorkerLoop = async () => {
         let emptyRounds = 0;
         while (emptyRounds < 8) {
-          if (isAborted) break;
+          if (isAborted || isSessionCancelled(db, sessionId)) break;
           const place = claimNextPlace(db, sessionId);
           if (!place) {
             const jobs = countJobs(db, sessionId);
@@ -238,7 +248,7 @@ export async function GET(request: NextRequest) {
       let pipelineDone = false;
       const streamLoop = async () => {
         while (!pipelineDone || hasPendingPlaces(db, sessionId)) {
-          if (isAborted) break;
+          if (isAborted || isSessionCancelled(db, sessionId)) break;
           const rows = drainStreamable(db, sessionId);
           for (const row of rows) {
             const c = countPlaces(db, sessionId);
@@ -292,7 +302,7 @@ export async function GET(request: NextRequest) {
 
       await emailContext.close();
       await emailBrowser.close();
-      updateSessionStatus(db, sessionId, 'done');
+      updateSessionStatus(db, sessionId, isSessionCancelled(db, sessionId) ? 'cancelled' : isAborted ? 'paused' : 'done');
       closeDb(sessionId);
 
       await send({ type: 'complete', message: 'Session completed!' });
@@ -300,10 +310,15 @@ export async function GET(request: NextRequest) {
       logger.error('[Resume] Error:', err);
       await send({ type: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
     } finally {
+      isAborted = true;
+      await cleanupPool?.close().catch(() => {});
+      await cleanupBrowser?.close().catch(() => {});
+      closeDb(sessionId);
       const { shutdownWorker } = await import('@/lib/llm-extractor');
       logger.log('🏁 Resume route execution finished, cleaning up resources...');
-      await shutdownWorker(); // Destroy LLM worker to avoid memory leaks
-      await writer.close();
+      await shutdownWorker().catch(() => {}); // Destroy LLM worker to avoid memory leaks
+      releaseRun();
+      try { await writer.close(); } catch { /* disconnected */ }
     }
   })();
 

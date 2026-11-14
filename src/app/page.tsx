@@ -2,6 +2,8 @@
 'use client';
 
 import React, { useState } from 'react';
+import PreflightDialog from '@/components/PreflightDialog';
+import type { PreflightReport } from '@/lib/system-preflight';
 import dynamic from 'next/dynamic';
 import { Upload, Download, Play, AlertCircle, CheckCircle, Loader, ChevronDown, ChevronRight, Filter } from 'lucide-react';
 import { normalizeOwnerNameString, sanitizeOwnerListField } from '@/lib/owner-name-normalizer';
@@ -134,6 +136,24 @@ const countries = [
 ];
 
 export default function BusinessScraper() {
+  const [preflight, setPreflight] = useState<PreflightReport | null>(null);
+  const preflightResolver = React.useRef<((start: boolean) => void) | null>(null);
+  const startingRef = React.useRef(false);
+  const [checkingSystem, setCheckingSystem] = useState(false);
+  async function checkBeforeStart(body: FormData | { sessionId: string }): Promise<boolean> {
+    if (startingRef.current) return false;
+    startingRef.current = true; setCheckingSystem(true);
+    try {
+      const isForm = body instanceof FormData;
+      const res = await fetch('/api/preflight', { method: 'POST', ...(isForm ? {} : { headers: { 'Content-Type': 'application/json' } }), body: isForm ? body : JSON.stringify(body) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setPreflight(data);
+      return await new Promise<boolean>(resolve => { preflightResolver.current = resolve; });
+    } catch (e) { setError(e instanceof Error ? e.message : 'Ressourcencheck fehlgeschlagen.'); return false; }
+    finally { startingRef.current = false; setCheckingSystem(false); }
+  }
+
   const [file, setFile] = useState<File | null>(null);
   const [processing, setProcessing] = useState(false);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
@@ -268,18 +288,6 @@ export default function BusinessScraper() {
       return;
     }
 
-    setProcessing(true);
-    setError('');
-    setResults(null);
-    setSessionId(null);
-    setBlockedInfo(null);
-    setSessionDropped(false);
-    userCancelledRef.current = false;
-    setProgress({ current: 0, total: 0, status: 'Starte...', searchCount: 0, totalSearches: 0 });
-
-    const controller = new AbortController();
-    setAbortController(controller);
-
     const formData = new FormData();
     formData.append('file', file);
     formData.append('searchEmail', String(searchEmail));
@@ -292,6 +300,21 @@ export default function BusinessScraper() {
     formData.append('categoryWhitelist', categoryWhitelist);
     formData.append('categoryBlacklist', categoryBlacklist);
     formData.append('enrichmentWorkerCount', String(enrichmentWorkerCount));
+    if (!await checkBeforeStart(formData)) return;
+
+    setProcessing(true);
+    setError('');
+    setResults(null);
+    setSessionId(null);
+    setBlockedInfo(null);
+    setSessionDropped(false);
+    userCancelledRef.current = false;
+    setProgress({ current: 0, total: 0, status: 'Starte...', searchCount: 0, totalSearches: 0 });
+
+    const controller = new AbortController();
+    setAbortController(controller);
+
+
 
     const tempResults: BusinessResult[] = [];
     let receivedComplete = false;
@@ -304,11 +327,13 @@ export default function BusinessScraper() {
       });
 
       if (!response.ok) {
-        throw new Error(t.scrapingFailed);
+        const failure = await response.json().catch(() => ({}));
+        throw new Error(failure.error || t.scrapingFailed);
       }
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
+      let pendingText = '';
       
       if (!reader) {
         throw new Error('Stream nicht verfügbar');
@@ -318,8 +343,9 @@ export default function BusinessScraper() {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        pendingText += decoder.decode(value, { stream: true });
+        const lines = pendingText.split('\n');
+        pendingText = lines.pop() || '';
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
@@ -474,6 +500,9 @@ export default function BusinessScraper() {
   };
 
   return (
+    <>
+      {preflight && <PreflightDialog report={preflight} onDecision={start => { setPreflight(null); preflightResolver.current?.(start); preflightResolver.current = null; }} />}
+      {checkingSystem && !preflight && <div role="status" className="fixed bottom-4 right-4 z-50 bg-indigo-950 text-white px-5 py-3 rounded-xl shadow-xl">Ressourcen und Laufzeit werden geprüft …</div>}
     <div className="min-h-screen bg-linear-to-br from-blue-50 to-indigo-100 p-8">
       <div className="w-full max-w-[95%] mx-auto">
         <div className="bg-white rounded-2xl shadow-xl p-8">
@@ -753,7 +782,7 @@ export default function BusinessScraper() {
           <div className="flex gap-4">
             <button
               onClick={startScraping}
-              disabled={!file || processing}
+              disabled={!file || processing || checkingSystem}
               className="flex-1 bg-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
             >
              {processing ? (
@@ -795,6 +824,7 @@ export default function BusinessScraper() {
                 <button
                   onClick={async () => {
                     if (!resumeSessionId.trim()) return;
+                    if (!await checkBeforeStart({ sessionId: resumeSessionId.trim() })) return;
                     setProcessing(true);
                     setError('');
                     setSessionId(resumeSessionId.trim());
@@ -808,13 +838,17 @@ export default function BusinessScraper() {
                       const response = await fetch(`/api/resume?session=${resumeSessionId.trim()}`, {
                         signal: controller.signal,
                       });
+                      if (!response.ok) { const failure = await response.json(); throw new Error(failure.error || 'Fortsetzen fehlgeschlagen.'); }
                       const reader = response.body?.getReader();
                       const decoder = new TextDecoder();
+                      let pendingText = "";
                       if (!reader) return;
                       while (true) {
                         const { done, value } = await reader.read();
                         if (done) break;
-                        const lines = decoder.decode(value).split('\n');
+                        pendingText += decoder.decode(value, { stream: true });
+                        const lines = pendingText.split('\n');
+                        pendingText = lines.pop() || '';
                         for (const line of lines) {
                           if (!line.startsWith('data: ')) continue;
                           try {
@@ -834,7 +868,7 @@ export default function BusinessScraper() {
                       setAbortController(null);
                     }
                   }}
-                  disabled={!resumeSessionId.trim() || processing}
+                  disabled={!resumeSessionId.trim() || processing || checkingSystem}
                   className="px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold hover:bg-amber-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
                 >
                   Resume
@@ -1203,5 +1237,6 @@ export default function BusinessScraper() {
         </div>
       </div>
     </div>
+    </>
   );
 }

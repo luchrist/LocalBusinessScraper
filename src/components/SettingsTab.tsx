@@ -1,6 +1,7 @@
 
 'use client';
 
+import ModelSettings from './ModelSettings';
 import React, { useState, useEffect } from 'react';
 import { Trash2, Plus, RefreshCw, Eye, EyeOff, AlertTriangle } from 'lucide-react';
 
@@ -106,7 +107,8 @@ export default function SettingsTab({
 
   return (
     <div className="max-w-4xl mx-auto p-6 bg-white rounded-lg shadow-sm border border-gray-200">
-      <h2 className="text-2xl font-bold mb-6 text-gray-800">Google Places API Settings</h2>
+      <h2 className="text-2xl font-bold mb-6 text-gray-800">Einstellungen</h2>
+      <ModelSettings />
       
       <div className="mb-8">
         <h3 className="text-lg font-semibold mb-3 text-gray-700">Add New Key</h3>

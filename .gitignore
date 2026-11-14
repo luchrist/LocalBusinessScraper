@@ -45,3 +45,12 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 logs/
+
+.desktop/
+release/
+license.json
+installation-id
+*.db-wal
+!.env.example
+
+model-settings.json

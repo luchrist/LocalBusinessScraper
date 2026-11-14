@@ -1,3 +1,4 @@
+import { dataRoot } from './app-paths';
 /**
  * db.ts – SQLite persistence layer for the scraper pipeline.
  *
@@ -82,12 +83,13 @@ export interface ClaimedPlaceRow extends PlaceRow {
 const dbCache = new Map<string, Database.Database>();
 
 function dataDir(): string {
-  const dir = path.join(process.cwd(), 'scraper-data');
+  const dir = path.join(dataRoot(), 'scraper-data');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
 export function openDb(sessionId: string): Database.Database {
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) throw new Error('Invalid session ID');
   if (dbCache.has(sessionId)) return dbCache.get(sessionId)!;
 
   const dbPath = path.join(dataDir(), `${sessionId}.db`);
@@ -482,7 +484,7 @@ export function hasUnfinishedWork(db: Database.Database, sessionId: string): boo
 // ─── Session list (for resume UI) ────────────────────────────────────────────
 
 export function listSessions(): { id: string; path: string; created_at: number; status: string; total_jobs: number; worker_count: number }[] {
-  const dir = path.join(process.cwd(), 'scraper-data');
+  const dir = path.join(dataRoot(), 'scraper-data');
   if (!fs.existsSync(dir)) return [];
 
   return fs.readdirSync(dir)

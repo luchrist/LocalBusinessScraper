@@ -1,0 +1,54 @@
+name: Publish verified installers
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag to publish
+        required: true
+        type: string
+      build_run_id:
+        description: Completed installer workflow run for exactly that tag
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Verify source and all platform builds
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" --jq .head_sha)" = "$(git rev-parse HEAD)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs" > jobs.json
+          jq -e '[.jobs[] | select(.name | startswith("build ("))] | length == 4 and all(.conclusion == "success")' jobs.json
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run_id }}
+          pattern: AutoSetter-*
+          merge-multiple: true
+          path: release
+      - name: Verify all installers and checksums
+        run: |
+          test -s release/Autosetter-macOS-arm64.dmg
+          test -s release/Autosetter-macOS-x64.dmg
+          test -s release/Autosetter-Windows-x64.exe
+          test -s release/Autosetter-Linux-x86_64.AppImage
+          test -s release/Autosetter-Linux-amd64.deb
+          cd release
+          sha256sum *.dmg *.exe *.AppImage *.deb > SHA256SUMS.txt
+      - name: Publish verified release
+        run: |
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "AutoSetter $RELEASE_TAG" --notes-file desktop/RELEASE_NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

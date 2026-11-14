@@ -1,7 +1,8 @@
+import { dataRoot } from './app-paths';
 import fs from 'fs';
 import path from 'path';
 
-const LOG_DIR = path.join(process.cwd(), 'logs');
+const LOG_DIR = path.join(dataRoot(), 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'scraper.log');
 
 // Defer directory creation to first write operation

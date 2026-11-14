@@ -34,3 +34,22 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+
+## AutoSetter desktop (v0.2)
+
+Use Node 24.19.0 for the native SQLite/LLM dependencies. Install dependencies with `npm ci`, then `npm test` and `npm run desktop:build`. This produces a native installer for the current OS. `npm run desktop:smoke` checks the staged runtime using a fake, local license server; it never generates leads, takes payments or sends emails.
+
+The installer bundles Node and Playwright Chromium, runs its local service on a random loopback port with a per-launch secret, and stores settings, licenses and results in the OS user-data directory. It never bundles `.env.local`, API keys, scraping databases or an owner's model path.
+
+The app makes one online license activation request to `https://www.autosetter.de`. The first successful activation permanently binds the purchased key to that computer. It stores a signed Ed25519 certificate; subsequent app starts and scrape starts/resumes verify the certificate and hardware binding locally, with no license-server request. Copying an installer or certificate cannot activate another computer. Retrying activation on the same hardware is idempotent to recover from a lost response. There is no self-service device release or remote revocation of already issued certificates.
+
+The bundled public key is in `src/lib/license-public-key.ts`. The matching private signing key belongs only in the activation server's secret environment. Never replace this keypair casually: existing installers trust the existing public key. Tests generate independent keys through the license manager factory; the production app has no test-key override.
+
+Before start/resume, RAM, CPU and busy processes are checked. Lead counts come from the imported search limits; unlimited searches show a labeled example. Time ranges are conservative planning estimates, not measured throughput guarantees. macOS uses `caffeinate -d -i -s`, and the desktop uses Electron's display sleep blocker on every OS. Assertions end with the real background job, including error/cancellation. Keep a notebook connected to power, online, and its lid open.
+
+Google Places API keys are entered in Settings. The local AI model is optional and is not bundled: select an existing compatible GGUF instruction model in Settings. Rule-based extraction remains available without it.
+
+`.github/workflows/installers.yml` builds Apple Silicon/Intel DMGs, Windows x64 NSIS setup, and Linux x64 AppImage/deb on native runners. Tags `v*` publish a GitHub Release only after every platform passes unit tests, runtime smoke checks, and packaging. All five installers and SHA-256 checksums are required. Workflow dispatch produces build artifacts without publishing.
+
+The default CI builds currently have ad-hoc macOS signatures and no Windows publisher certificate; they are not Apple-notarized. Public distribution without OS warnings requires Developer ID/notarization and a Windows Authenticode certificate. A Developer ID identity exists on the current development Mac, but release CI does not have its private signing credentials. The one-time activation API must be deployed before buyers can activate the installers.

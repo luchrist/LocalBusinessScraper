@@ -1,8 +1,9 @@
+import { dataRoot } from './app-paths';
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const DATA_DIR = path.join(process.cwd(), 'scraper-data');
+const DATA_DIR = path.join(dataRoot(), 'scraper-data');
 
 // Lazy initialize the data directory
 function ensureDataDir() {

@@ -1,3 +1,5 @@
+import { getModelPath } from './model-settings';
+import { assetRoot } from './app-paths';
 import { logger } from '@/lib/logger';
 import { Worker } from 'worker_threads';
 import path from 'path';
@@ -49,11 +51,12 @@ async function getWorker(): Promise<Worker | null> {
 
   if (llmWorker) return llmWorker;
 
+  const modelPath = await getModelPath();
   isInitializing = true;
   initPromise = new Promise<void>((resolve) => {
     logger.log("🚀 Spawning LLM Worker thread...");
-    const workerPath = path.resolve(process.cwd(), 'src/lib/llm-worker.mjs');
-    llmWorker = new Worker(workerPath);
+    const workerPath = path.resolve(assetRoot(), 'src/lib/llm-worker.mjs');
+    llmWorker = new Worker(workerPath, { env: { ...process.env, ...(modelPath ? { LLM_MODEL_PATH: modelPath } : {}) } });
 
     llmWorker.on('message', (msg) => {
       if (msg.type === 'READY') {
@@ -92,6 +95,7 @@ async function getWorker(): Promise<Worker | null> {
 }
 
 export async function shutdownWorker(): Promise<void> {
+  llmAvailable = true; isInitializing = false; initPromise = null;
   if (llmWorker) {
     logger.log("🛑 Terminating LLM Worker thread...");
     await llmWorker.terminate();
