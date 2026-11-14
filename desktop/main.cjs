@@ -37,7 +37,7 @@ async function start() {
       PORT: String(localPort), HOSTNAME: '127.0.0.1', AUTOSETTER_DATA_DIR: dataRoot,
       AUTOSETTER_ASSET_DIR: serverRoot, AUTOSETTER_LOCAL_TOKEN: secret,
       PLAYWRIGHT_BROWSERS_PATH: path.join(resources, 'browsers'),
-      AUTOSETTER_LICENSE_SERVER: 'https://autosetter.de',
+      AUTOSETTER_LICENSE_SERVER: 'https://www.autosetter.de',
     },
   });
   backend.on('message', msg => { if (msg?.type === 'autosetter-power') setAwake(msg.active === true); });

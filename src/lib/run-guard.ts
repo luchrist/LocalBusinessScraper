@@ -4,8 +4,8 @@ type State = { running: boolean; child: ChildProcess | null };
 const globalState = globalThis as typeof globalThis & { autosetterRun?: State };
 const state = globalState.autosetterRun ??= { running: false, child: null };
 export class RunError extends Error { constructor(message: string, public status: number) { super(message); } }
-export async function beginRun() {
-  try { await requireLicense(); } catch (e) { throw new RunError(e instanceof Error ? e.message : 'Lizenzprüfung fehlgeschlagen.', 403); }
+export async function beginRun(validateLicense: () => Promise<void> = requireLicense) {
+  try { await validateLicense(); } catch (e) { throw new RunError(e instanceof Error ? e.message : 'Lizenzprüfung fehlgeschlagen.', 403); }
   if (state.running) throw new RunError('Es läuft bereits eine Recherche. Bitte beende sie zuerst.', 409);
   state.running = true;
   try {

@@ -1,11 +1,12 @@
 import { isRunning } from '@/lib/run-guard';
 import { NextRequest, NextResponse } from 'next/server';
-import { requireLicense, activateLicense, deactivateLicense } from '@/lib/app-license';
+import { requireLicense, activateLicense } from '@/lib/app-license';
 export async function GET() {
   try { await requireLicense(); return NextResponse.json({ active: true }, { headers: { 'Cache-Control': 'no-store' } }); }
   catch { return NextResponse.json({ active: false }, { headers: { 'Cache-Control': 'no-store' } }); }
 }
 export async function POST(req: NextRequest) {
+  if (isRunning()) return NextResponse.json({ error: 'Beende zuerst die laufende Recherche.' }, { status: 409 });
   try {
     const body = await req.json();
     const key = typeof body?.key === 'string' ? body.key.trim().toUpperCase() : '';
@@ -14,7 +15,5 @@ export async function POST(req: NextRequest) {
   } catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : 'Aktivierung fehlgeschlagen.' }, { status: 403 }); }
 }
 export async function DELETE() {
-  if (isRunning()) return NextResponse.json({ error: 'Beende zuerst die laufende Recherche.' }, { status:409 });
-  try { await deactivateLicense(); return NextResponse.json({ active: false }); }
-  catch { return NextResponse.json({ error: 'Gerät konnte nicht freigegeben werden. Bitte prüfe deine Internetverbindung.' }, { status: 503 }); }
+  return NextResponse.json({ error: 'Die Lizenz ist dauerhaft an diesen Computer gebunden. Bitte kontaktiere den Support.' }, { status: 409 });
 }

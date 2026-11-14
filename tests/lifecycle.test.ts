@@ -1,37 +1,63 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
+import { generateKeyPairSync, sign } from 'node:crypto';
 
-test('license required, device binding, single run, wake cleanup and revocation', async () => {
+test('one online activation, offline restarts, copied certificates and tamper rejection', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'autosetter-test-'));
-  process.env.AUTOSETTER_DATA_DIR=dir;
-  let revoked=false; let device='';
+  const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+  const encodedPublic=publicKey.export({type:'spki',format:'der'}).toString('base64');
+  let requests=0;let bound='';let machine='a'.repeat(64);let forged=false;
   const api=createServer(async(req,res)=>{
-    let raw=''; for await(const part of req) raw+=part;
-    const body=JSON.parse(raw); res.setHeader('content-type','application/json');
-    if (body.key !== 'ASET-ABCD-EFGH-JKMP' || revoked) {res.writeHead(403);res.end(JSON.stringify({error:'revoked'}));return;}
-    if(req.url?.endsWith('/activate')){device=body.machine_id;res.end('{"ok":true}');}
-    else if(req.url?.endsWith('/deactivate')){device='';res.end('{"ok":true}');}
-    else{res.end(JSON.stringify({valid:device===body.machine_id}));}
+    requests++;
+    let raw='';for await(const part of req)raw+=part;
+    const body=JSON.parse(raw);res.setHeader('content-type','application/json');
+    assert.equal(req.url,'/api/license/activate','only activation may contact the server');
+    if(body.key!=='ASET-ABCD-EFGH-JKMP'||(bound&&bound!==body.machine_id)){
+      res.writeHead(403);res.end('{"error":"already activated"}');return;
+    }
+    bound=body.machine_id;
+    const payload=Buffer.from(JSON.stringify({v:1,product:'autosetter_lifetime_v1',id:'license-1',machine:bound})).toString('base64url');
+    const certificate=forged?'ASET1.invalid.invalid':`ASET1.${payload}.${sign(null,Buffer.from(payload),privateKey).toString('base64url')}`;
+    res.end(JSON.stringify({ok:true,certificate}));
   });
-  api.listen(0,'127.0.0.1'); await once(api,'listening');
-  process.env.AUTOSETTER_LICENSE_SERVER=`http://127.0.0.1:${(api.address() as any).port}`;
+  api.listen(0,'127.0.0.1');await once(api,'listening');
   try {
-    const license=await import('../src/lib/app-license');
+    const {createLicenseManager}=await import('../src/lib/app-license');
+    const config={server:`http://127.0.0.1:${(api.address() as any).port}`,publicKey:encodedPublic,file:()=>path.join(dir,'license.json'),machine:async()=>machine};
+    const license=createLicenseManager(config);
     const guard=await import('../src/lib/run-guard');
-    await assert.rejects(guard.beginRun(), /Lizenz/);
+    await assert.rejects(guard.beginRun(license.requireLicense),/Lizenz/);
     await license.activateLicense('ASET-ABCD-EFGH-JKMP');
-    assert.match(device,/^[a-f0-9]{64}$/);
-    assert.equal(JSON.parse(await readFile(path.join(dir,'license.json'),'utf8')).key,'ASET-ABCD-EFGH-JKMP');
-    const stop=await guard.beginRun(); assert.equal(guard.isRunning(),true);
-    await assert.rejects(guard.beginRun(), /bereits/);
+    assert.equal(requests,1);
+    const original=await readFile(config.file(),'utf8');
+    assert.ok(JSON.parse(original).certificate);
+    assert.equal(JSON.parse(original).key,undefined,'the reusable purchase key is not stored');
+    const stop=await guard.beginRun(license.requireLicense);assert.equal(guard.isRunning(),true);
+    await assert.rejects(guard.beginRun(license.requireLicense),/bereits/);
     stop();stop();assert.equal(guard.isRunning(),false);
-    revoked=true;await assert.rejects(guard.beginRun(), /revoked/);assert.equal(guard.isRunning(),false);
-    revoked=false;await license.deactivateLicense();assert.equal(await license.savedLicense(),null);
+    await createLicenseManager(config).requireLicense();
+    assert.equal(requests,1,'restarts and new runs must work without a network request');
+
+    machine='b'.repeat(64);
+    await assert.rejects(license.requireLicense(),/Lizenz/,'copied activation cannot unlock another device');
+    await assert.rejects(license.activateLicense('ASET-ABCD-EFGH-JKMP'),/already activated/);
+    machine='a'.repeat(64);
+    const parsed=JSON.parse(original);
+    const [version,payload,signature]=parsed.certificate.split('.');
+    const changed=Buffer.from(JSON.stringify({...JSON.parse(Buffer.from(payload,'base64url').toString()),machine:'b'.repeat(64)})).toString('base64url');
+    await writeFile(config.file(),JSON.stringify({certificate:`${version}.${changed}.${signature}`}));
+    await assert.rejects(license.requireLicense(),/Lizenz/,'editing the signed machine ID must be rejected');
+    await writeFile(config.file(),original);
+    forged=true;
+    await assert.rejects(license.activateLicense('ASET-ABCD-EFGH-JKMP'),/bestätigt/);
+    assert.equal(await readFile(config.file(),'utf8'),original,'bad server responses must not replace valid activation');
+    api.closeAllConnections();api.close();
+    await createLicenseManager(config).requireLicense();
   } finally {api.closeAllConnections();api.close();await rm(dir,{recursive:true,force:true});}
 });
 

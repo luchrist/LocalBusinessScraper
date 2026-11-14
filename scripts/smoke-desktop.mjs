@@ -11,13 +11,14 @@ const resources=process.env.AUTOSETTER_SMOKE_RESOURCES || path.join(root,'.deskt
 const runtime=path.join(resources,'runtime',process.platform==='win32'?'node.exe':'node');
 const serverRoot=path.join(resources,'server');
 const key='ASET-ABCD-EFGH-JKMP';
-let activated=false;
+let activationRequests=0;
 const licenses=createServer(async(req,res)=>{
   let raw='';for await(const p of req)raw+=p;const body=JSON.parse(raw);
   res.setHeader('content-type','application/json');
   if(body.key!==key){res.writeHead(403);res.end('{"error":"test key invalid"}');return;}
-  if(req.url.endsWith('/activate'))activated=true;
-  res.end(JSON.stringify({ok:true,valid:activated}));
+  activationRequests++;
+  assert.ok(req.url.endsWith('/activate'),'the app must not validate online');
+  res.end(JSON.stringify({ok:true,certificate:'unsigned-test-response'}));
 });
 licenses.listen(0,'127.0.0.1');await once(licenses,'listening');
 const reservation=net.createServer();reservation.listen(0,'127.0.0.1');await once(reservation,'listening');const port=reservation.address().port;await new Promise(r=>reservation.close(r));
@@ -31,13 +32,14 @@ try{
   assert.ok(ready,'server startup: '+logs);
   assert.equal((await fetch(origin+'/api/health')).status,403,'packaged local server rejects requests without token');
   assert.equal((await call('/api/scrape',{method:'POST',body:new FormData()})).status,403,'scrape is gated on backend');
-  assert.equal((await call('/api/license',{method:'POST',headers:{'Content-Type':'application/json',origin},body:JSON.stringify({key})})).status,200,'activation works behind loopback origin');
+  assert.equal((await call('/api/license',{method:'POST',headers:{'Content-Type':'application/json',origin},body:JSON.stringify({key})})).status,403,'an unsigned activation response must not unlock the packaged app');
   const form=new FormData();form.append('file',new Blob(['Stadt,Branche,max\nBerlin,Restaurant,60\nHamburg,Hotel,20\n'],{type:'text/csv'}),'searches.csv');form.append('searchEmail','true');form.append('searchOwner','true');
   const preflight=await call('/api/preflight',{method:'POST',headers:{origin},body:form});assert.equal(preflight.status,200);const report=await preflight.json();assert.equal(report.estimatedLeads,80);assert.ok(report.maxMinutes>report.minMinutes);
   assert.equal((await call('/api/history')).status,200,'native SQLite works in bundled Node');
-  const bad=await call('/api/scrape',{method:'POST',body:new FormData()});assert.equal(bad.status,200);assert.match(await bad.text(),/No file uploaded/);
-  await new Promise(r=>setTimeout(r,100));assert.deepEqual(power,[true,false],'wake lock follows actual job lifecycle including failed start');
+  assert.equal((await call('/api/scrape',{method:'POST',body:new FormData()})).status,403,'failed activation keeps scraping locked');
+  assert.equal(activationRequests,1,'only the explicit activation contacts the server');
+  await new Promise(r=>setTimeout(r,100));assert.deepEqual(power,[],'an unlicensed job must not acquire a wake lock');
   execFileSync(runtime,['--input-type=module','-e',"const {chromium}=await import('playwright');const browser=await chromium.launch({headless:true,args:['--no-sandbox']});await browser.close();console.log('Bundled Chromium launches');"],{cwd:serverRoot,env:{...process.env,PLAYWRIGHT_BROWSERS_PATH:path.join(resources,'browsers')},stdio:'inherit'});
-  console.log('Desktop smoke passed: local authentication, activation, preflight CSV limits, native SQLite, wake IPC, bundled Chromium.');
+  console.log('Desktop smoke passed: local authentication, signed activation enforcement, preflight CSV limits, native SQLite, bundled Chromium.');
 }catch(e){console.error(logs);throw e;}
 finally{child.kill();licenses.closeAllConnections();licenses.close();await fs.rm(temp,{recursive:true,force:true});}

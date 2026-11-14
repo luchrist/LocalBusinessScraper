@@ -2,8 +2,11 @@ AutoSetter
 
 macOS: AutoSetter.app in den Programme-Ordner ziehen.
 Windows: Installer starten und den Schritten folgen.
+Linux: AppImage ausführbar machen und starten oder das .deb-Paket installieren.
 
-Nach dem Start den gekauften Lizenzschlüssel eingeben.
+Nach dem Start den gekauften Lizenzschlüssel einmal eingeben.
+Die Lizenz wird dauerhaft an diesen Computer gebunden.
+Danach wird die Freischaltung lokal geprüft; es gibt keine weiteren Lizenzserver-Anfragen.
 Google-Places-API-Schlüssel bei Bedarf unter Einstellungen hinterlegen.
 Die optionale lokale KI benötigt ein GGUF-Modell; dieses kann in den Einstellungen eingerichtet werden.
 Für die Aktivierung und Recherchen ist Internet erforderlich.
