@@ -65,8 +65,8 @@ jobs:
           test -s release/Autosetter-macOS-arm64.dmg
           test -s release/Autosetter-macOS-x64.dmg
           test -s release/Autosetter-Windows-x64.exe
-          test -s release/Autosetter-Linux-x64.AppImage
-          test -s release/Autosetter-Linux-x64.deb
+          test -s release/Autosetter-Linux-x86_64.AppImage
+          test -s release/Autosetter-Linux-amd64.deb
           cd release
           sha256sum *.dmg *.exe *.AppImage *.deb > SHA256SUMS.txt
       - name: Publish installers
