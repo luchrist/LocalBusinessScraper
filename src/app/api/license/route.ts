@@ -1,8 +1,9 @@
+import { trialUsage } from '@/lib/trial-usage';
 import { isRunning } from '@/lib/run-guard';
 import { NextRequest, NextResponse } from 'next/server';
-import { requireLicense, activateLicense } from '@/lib/app-license';
+import { licenseAccess, activateLicense } from '@/lib/app-license';
 export async function GET() {
-  try { await requireLicense(); return NextResponse.json({ active: true }, { headers: { 'Cache-Control': 'no-store' } }); }
+  try { const access = await licenseAccess(); return NextResponse.json({ active: true, ...access, used: access.tier === 'trial' ? await trialUsage(access.id) : undefined }, { headers: { 'Cache-Control': 'no-store' } }); }
   catch { return NextResponse.json({ active: false }, { headers: { 'Cache-Control': 'no-store' } }); }
 }
 export async function POST(req: NextRequest) {

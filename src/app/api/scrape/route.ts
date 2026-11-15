@@ -1,3 +1,5 @@
+import { recordLicensedResult } from '@/lib/trial-usage';
+import { TrialPaymentRequired } from '@/lib/app-license';
 import { beginRun, RunError } from '@/lib/run-guard';
 //api/scrape
 import { logger } from '@/lib/logger';
@@ -113,6 +115,7 @@ export async function POST(request: NextRequest) {
   let cleanupPool: ScraperPool | null = null;
   let cleanupSession: string | null = null;
   let completed = false;
+  let paymentPaused = false;
   let stopBackgroundWorkers = false;
 
   // Start processing in background
@@ -541,7 +544,7 @@ export async function POST(request: NextRequest) {
 
             // Insert placeholder into DB immediately
             const placeKey = place.id || `${place.name}|${place.address}`;
-            insertPlace(db, sessionId, jobId, {
+            await recordLicensedResult(() => insertPlace(db, sessionId, jobId, {
               name: place.name,
               website: place.website,
               phone: place.phone,
@@ -552,7 +555,7 @@ export async function POST(request: NextRequest) {
               address: place.address,
               placeKey: placeKey,
               exactIndustry: place.exactIndustry,
-            });
+            }));
 
             totalBusinessesFound++;
             await sendProgress({
@@ -636,14 +639,14 @@ export async function POST(request: NextRequest) {
 
                 // Write to SQLite (disk) immediately so the placeholder exists
                 const placeKey2 = place.placeKey || `${place.name}|${place.address ?? ''}`;
-                insertPlace(db, sessionId, jobId, {
+                await recordLicensedResult(() => insertPlace(db, sessionId, jobId, {
                   name: place.name, website: place.website ?? undefined,
                   phone: place.phone ?? undefined, rating: place.rating ?? undefined,
                   reviews: place.reviews ?? undefined, hours: place.hours ?? undefined,
                   price: (place as any).price ?? undefined,
                   address: place.address ?? undefined, placeKey: placeKey2,
                   exactIndustry: (place as any).exactIndustry ?? undefined,
-                });
+                }));
 
                 totalBusinessesFound++;
                 await sendProgress({
@@ -658,6 +661,7 @@ export async function POST(request: NextRequest) {
                 scraped++;
               }
             } catch (e) {
+              if (e instanceof TrialPaymentRequired) throw e;
               if (e instanceof BlockDetectionError) {
                 if (e.level === 2) {
                     if (!isSecondAttempt) {
@@ -763,14 +767,21 @@ export async function POST(request: NextRequest) {
         message: 'Scraping completed!',
       });
     } catch (error) {
+      paymentPaused = error instanceof TrialPaymentRequired;
+      if (paymentPaused && cleanupSession) {
+        const pausedDb = openDb(cleanupSession);
+        pausedDb.prepare("UPDATE jobs SET status = 'pending' WHERE session_id = ? AND status = 'running'").run(cleanupSession);
+        pausedDb.prepare("UPDATE sessions SET status = 'paused' WHERE id = ?").run(cleanupSession);
+      }
       logger.error('❌ Scraping error:', error);
       await sendProgress({
         type: 'error',
         message: error instanceof Error ? error.message : 'Unknown error occurred',
+        paymentUrl: error instanceof TrialPaymentRequired ? error.paymentUrl : undefined,
       });
     } finally {
       stopBackgroundWorkers = true;
-      if (!completed && cleanupSession) {
+      if (!completed && !paymentPaused && cleanupSession) {
         try { cancelSession(openDb(cleanupSession), cleanupSession); } catch {}
       }
       await cleanupPool?.close().catch(() => {});

@@ -15,7 +15,7 @@ async function init() {
   try {
     llama = await getLlama();
     const gbRam = os.totalmem() / 1024 ** 3;
-    const defaultModelFile = gbRam <= 12 ? "qwen2.5-1.5b-instruct-q4_k_m.gguf" : "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf";
+    const defaultModelFile = gbRam <= 12 ? "qwen2.5-1.5b-instruct-q4_k_m.gguf" : "Qwen2.5-7B-Instruct-Q4_K_M.gguf";
     const modelPath = process.env.LLM_MODEL_PATH || path.join(process.cwd(), "models", defaultModelFile);
     
     model = await llama.loadModel({

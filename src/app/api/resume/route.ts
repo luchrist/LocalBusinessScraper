@@ -1,3 +1,5 @@
+import { recordLicensedResult } from '@/lib/trial-usage';
+import { TrialPaymentRequired } from '@/lib/app-license';
 import { beginRun, RunError } from '@/lib/run-guard';
 /**
  * /api/resume – Resume an interrupted scraping session.
@@ -49,6 +51,7 @@ export async function GET(request: NextRequest) {
 
   let cleanupBrowser: Browser | null = null;
   let cleanupPool: ScraperPool | null = null;
+  let paymentPaused = false;
   (async () => {
     try {
       // ── Load session ────────────────────────────────────────────────────
@@ -179,15 +182,16 @@ export async function GET(request: NextRequest) {
               if (domain && seenDomains.has(domain)) continue;
               seenPlaceIds.add(placeKey);
               if (domain) seenDomains.add(domain);
-              insertPlace(db, sessionId, jobId, {
+              await recordLicensedResult(() => insertPlace(db, sessionId, jobId, {
                 name: place.name, website: place.website, phone: place.phone,
                 rating: place.rating, reviews: place.reviews,
                 hours: place.hours, address: place.address, placeKey,
                 exactIndustry: (place as any).exactIndustry,
-              });
+              }));
             }
             markJobDone(db, jobId, 'done');
           } catch (e) {
+            if (e instanceof TrialPaymentRequired) throw e;
             logger.error(`[Resume][Maps] Job error ${jobId}:`, e);
             markJobDone(db, jobId, 'error');
           } finally {
@@ -307,6 +311,12 @@ export async function GET(request: NextRequest) {
 
       await send({ type: 'complete', message: 'Session completed!' });
     } catch (err) {
+      paymentPaused = err instanceof TrialPaymentRequired;
+      if (paymentPaused) {
+        const pausedDb = openDb(sessionId);
+        pausedDb.prepare("UPDATE jobs SET status = 'pending' WHERE session_id = ? AND status = 'running'").run(sessionId);
+        updateSessionStatus(pausedDb, sessionId, 'paused');
+      }
       logger.error('[Resume] Error:', err);
       await send({ type: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
     } finally {
