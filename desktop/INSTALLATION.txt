@@ -4,11 +4,14 @@ macOS: AutoSetter.app in den Programme-Ordner ziehen.
 Windows: Installer starten und den Schritten folgen.
 Linux: AppImage ausführbar machen und starten oder das .deb-Paket installieren.
 
-Nach dem Start den gekauften Lizenzschlüssel einmal eingeben.
+Nach dem Start den Test- oder gekauften Lizenzschlüssel einmal eingeben.
 Die Lizenz wird dauerhaft an diesen Computer gebunden.
-Danach wird die Freischaltung lokal geprüft; es gibt keine weiteren Lizenzserver-Anfragen.
+Im Test sind 50 Ergebnisse kostenlos. Vor Ergebnis 51 wird die vereinbarte Einmalzahlung von 299 € angefragt. Bei nötiger Bankbestätigung pausiert die Recherche.
+Den Test kannst du vorher in der App beenden.
+Nach der Bezahlung wird die Lifetime-Freischaltung lokal geprüft; es gibt dann keine weiteren Lizenzserver-Anfragen.
 Google-Places-API-Schlüssel bei Bedarf unter Einstellungen hinterlegen.
-Die optionale lokale KI benötigt ein GGUF-Modell; dieses kann in den Einstellungen eingerichtet werden.
+Das passende lokale Qwen-KI-Modell wird beim ersten Start automatisch heruntergeladen und geprüft. Einen unterbrochenen Download kannst du fortsetzen.
+Ein eigenes kompatibles GGUF-Modell kannst du alternativ in den Einstellungen auswählen.
 Für die Aktivierung und Recherchen ist Internet erforderlich.
 
 Laufende Recherchen halten Bildschirm und System wach. Notebook am Strom lassen und Deckel geöffnet halten.

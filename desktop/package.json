@@ -1,7 +1,7 @@
 {
   "name": "autosetter-desktop",
   "productName": "AutoSetter",
-  "version": "0.2.2",
+  "version": "0.3.1",
   "main": "main.cjs",
   "description": "AutoSetter local business research",
   "author": {

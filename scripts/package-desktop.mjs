@@ -1,5 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs';
+const manifest = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const shellPath = path.join('desktop', 'package.json');
+const shell = JSON.parse(fs.readFileSync(shellPath, 'utf8'));
+if (shell.version !== manifest.version) {
+  shell.version = manifest.version;
+  fs.writeFileSync(shellPath, JSON.stringify(shell, null, 2) + '\n');
+}
 const env={...process.env};
 // GitHub supplies missing optional secrets as empty strings. electron-builder
 // treats an empty certificate link as the current directory, so omit it.
