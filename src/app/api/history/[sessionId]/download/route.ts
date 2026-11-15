@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { dataRoot } from '@/lib/app-paths';
 import path from 'path';
 import fs from 'fs';
 import Database from 'better-sqlite3';
@@ -41,7 +42,8 @@ export async function GET(
     return NextResponse.json({ error: 'Session ID required' }, { status: 400 });
   }
 
-  const dbPath = path.join(process.cwd(), 'scraper-data', `${sessionId}.db`);
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) return NextResponse.json({ error: 'Invalid session ID' }, { status: 400 });
+  const dbPath = path.join(dataRoot(), 'scraper-data', `${sessionId}.db`);
   if (!fs.existsSync(dbPath)) {
     return NextResponse.json({ error: 'Session not found' }, { status: 404 });
   }

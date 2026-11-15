@@ -67,3 +67,38 @@ test('preflight produces a conservative planning range from actual OS metrics', 
   assert.ok(result.totalGb>0);assert.ok(result.availableGb>=0);assert.ok(result.cpuPercent>=0&&result.cpuPercent<=100);
   assert.ok(result.maxMinutes>result.minMinutes);assert.equal(result.estimatedLeads,1000);assert.equal(result.openEnded,false);
 });
+
+test('trial certificates remain restricted; bank failure and offline upgrade pause until a signed paid license arrives', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'autosetter-trial-license-'));
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const machine = 'a'.repeat(64); let paid = false; let requests = 0;
+  const certificate = (trial: boolean) => {
+    const payload = Buffer.from(JSON.stringify(trial ? { v: 2, product: 'autosetter_trial_v1', id: 'trial-1', machine, limit: 50, priceCents: 29900 } : { v: 1, product: 'autosetter_lifetime_v1', id: 'paid-1', machine })).toString('base64url');
+    return `${trial ? 'ASET2' : 'ASET1'}.${payload}.${sign(null, Buffer.from(payload), privateKey).toString('base64url')}`;
+  };
+  const api = createServer(async (req, res) => {
+    requests++; res.setHeader('content-type', 'application/json');
+    if (req.url === '/api/license/activate') return res.end(JSON.stringify({ certificate: certificate(true) }));
+    assert.equal(req.url, '/api/trial/upgrade');
+    if (!paid) return res.end(JSON.stringify({ paid: false, paymentUrl: 'https://checkout.stripe.com/test' }));
+    res.end(JSON.stringify({ paid: true, certificate: certificate(false) }));
+  });
+  api.listen(0, '127.0.0.1'); await once(api, 'listening');
+  try {
+    const { createLicenseManager, TrialPaymentRequired } = await import('../src/lib/app-license');
+    const { readLicenseCertificate } = await import('../src/lib/license-certificate');
+    const encodedPublic = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const config = { server: `http://127.0.0.1:${(api.address() as any).port}`, publicKey: encodedPublic, file: () => path.join(dir, 'license.json'), machine: async () => machine };
+    const manager = createLicenseManager(config);
+    await manager.activateLicense('TEST'); assert.equal((await manager.access()).tier, 'trial');
+    assert.equal(readLicenseCertificate(certificate(true).replace('ASET2.', 'ASET1.'), machine, encodedPublic), null);
+    assert.equal(readLicenseCertificate(certificate(true), 'b'.repeat(64), encodedPublic), null);
+    await assert.rejects(manager.upgradeTrial(), e => e instanceof TrialPaymentRequired && !!e.paymentUrl);
+    assert.equal((await manager.access()).tier, 'trial');
+    paid = true; await manager.upgradeTrial(); assert.equal((await manager.access()).tier, 'lifetime');
+    const before = requests; api.closeAllConnections(); api.close();
+    await createLicenseManager(config).upgradeTrial(); assert.equal(requests, before);
+    await writeFile(config.file(), JSON.stringify({ certificate: certificate(true) }));
+    await assert.rejects(createLicenseManager(config).upgradeTrial(), TrialPaymentRequired);
+  } finally { api.closeAllConnections(); api.close(); await rm(dir, { recursive: true, force: true }); }
+});

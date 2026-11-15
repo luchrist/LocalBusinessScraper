@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { modelSetupState, startModelSetup } from './model-download';
 import { requireLicense } from './app-license';
 type State = { running: boolean; child: ChildProcess | null };
 const globalState = globalThis as typeof globalThis & { autosetterRun?: State };
@@ -6,6 +7,10 @@ const state = globalState.autosetterRun ??= { running: false, child: null };
 export class RunError extends Error { constructor(message: string, public status: number) { super(message); } }
 export async function beginRun(validateLicense: () => Promise<void> = requireLicense) {
   try { await validateLicense(); } catch (e) { throw new RunError(e instanceof Error ? e.message : 'Lizenzprüfung fehlgeschlagen.', 403); }
+  if (process.env.AUTOSETTER_LOCAL_TOKEN && (await modelSetupState()).status !== 'ready') {
+    await startModelSetup();
+    throw new RunError('Das lokale KI-Modell wird noch eingerichtet. Bitte warte, bis der Download abgeschlossen ist.', 425);
+  }
   if (state.running) throw new RunError('Es läuft bereits eine Recherche. Bitte beende sie zuerst.', 409);
   state.running = true;
   try {

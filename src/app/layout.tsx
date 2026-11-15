@@ -1,3 +1,4 @@
+import ModelSetup from "@/components/ModelSetup";
 import LicenseGate from "@/components/LicenseGate";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
@@ -28,7 +29,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <LicenseGate>{children}</LicenseGate>
+        <ModelSetup /><LicenseGate>{children}</LicenseGate>
       </body>
     </html>
   );

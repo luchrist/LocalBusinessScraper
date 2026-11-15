@@ -48,8 +48,17 @@ The bundled public key is in `src/lib/license-public-key.ts`. The matching priva
 
 Before start/resume, RAM, CPU and busy processes are checked. Lead counts come from the imported search limits; unlimited searches show a labeled example. Time ranges are conservative planning estimates, not measured throughput guarantees. macOS uses `caffeinate -d -i -s`, and the desktop uses Electron's display sleep blocker on every OS. Assertions end with the real background job, including error/cancellation. Keep a notebook connected to power, online, and its lid open.
 
-Google Places API keys are entered in Settings. The local AI model is optional and is not bundled: select an existing compatible GGUF instruction model in Settings. Rule-based extraction remains available without it.
+Google Places API keys are entered in Settings. On first launch, AutoSetter automatically downloads and verifies Qwen 2.5 Instruct Q4_K_M (1.5B for up to 12 GB RAM, 7B above 12 GB). Interrupted downloads resume. Settings still supports a manual compatible GGUF model. Models are stored in the OS user-data directory.
 
 `.github/workflows/installers.yml` builds Apple Silicon/Intel DMGs, Windows x64 NSIS setup, and Linux x64 AppImage/deb on native runners. Tags `v*` publish a GitHub Release only after every platform passes unit tests, runtime smoke checks, and packaging. All five installers and SHA-256 checksums are required. Workflow dispatch produces build artifacts without publishing.
 
 The default CI builds currently have ad-hoc macOS signatures and no Windows publisher certificate; they are not Apple-notarized. Public distribution without OS warnings requires Developer ID/notarization and a Windows Authenticode certificate. A Developer ID identity exists on the current development Mac, but release CI does not have its private signing credentials. The one-time activation API must be deployed before buyers can activate the installers.
+
+
+### Card-backed trial
+
+Trial activation uses a separate signed ASET2 certificate, which older lifetime-only apps reject. The first 50 inserted business results are counted locally across all runs. Before result 51, the app requests the agreed one-time 299 EUR charge. Concurrent requests are serialized; failed or bank-pending payments pause the research. A signed ASET1 lifetime certificate replaces the trial only after successful payment. Paid use verifies locally. The trial can be ended in the license bar before paid use.
+
+### Private website demo on the VPS
+
+`scripts/demo-server.mjs` is a separate server adapter and is not bundled in installers. It starts a private Next backend on 127.0.0.1:3202 and exposes only an authenticated five-result demo and CSV downloads on 127.0.0.1:3201. The server requires its own machine-bound owner activation, model, Google Places key and Mailgun credentials. Configure `AUTOSETTER_DATA_DIR`, `AUTOSETTER_LOCAL_TOKEN`, `AUTOSETTER_DEMO_TOKEN`, `GOOGLE_PLACES_API_KEY`, `MAILGUN_API_KEY`, `MAILGUN_DOMAIN` and `MAILGUN_FROM` in a root-readable systemd environment file. Proxy the adapter over HTTPS; never expose the research backend directly. The landing page sends `AUTOSETTER_DEMO_TOKEN` server-side. Demo CSV links expire after seven days.

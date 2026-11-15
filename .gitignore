@@ -54,3 +54,6 @@ installation-id
 !.env.example
 
 model-settings.json
+
+trial-usage.json
+models/
