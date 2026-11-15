@@ -1,4 +1,4 @@
-AutoSetter 0.3.0 for macOS (Apple Silicon / Intel), Windows x64 and Linux x64 (AppImage / deb).
+AutoSetter 0.3.1 for macOS (Apple Silicon / Intel), Windows x64 and Linux x64 (AppImage / deb).
 
 The first launch downloads and verifies the appropriate local Qwen 2.5 Instruct model automatically: 1.5B on computers with up to 12 GB RAM, 7B above 12 GB. Interrupted downloads can resume. Manual GGUF model selection remains available.
 

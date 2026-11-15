@@ -1,0 +1,21 @@
+[Unit]
+Description=AutoSetter private live demo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autosetter
+Group=autosetter
+WorkingDirectory=/opt/autosetter-demo
+EnvironmentFile=/etc/autosetter-demo.env
+ExecStart=/usr/bin/node /opt/autosetter-demo/scripts/demo-server.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

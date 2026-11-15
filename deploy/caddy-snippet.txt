@@ -1,0 +1,10 @@
+# Add these handlers inside the existing factory.creatare.de site block.
+# The first handler forwards only the authenticated demo adapter; the full
+# research backend on port 3202 must remain loopback-only.
+handle_path /autosetter-demo/* {
+    reverse_proxy 127.0.0.1:3201
+}
+# Keep the existing application's fallback:
+handle {
+    reverse_proxy 127.0.0.1:4318
+}

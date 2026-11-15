@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const token = process.env.AUTOSETTER_DEMO_TOKEN;
-if (!token || !process.env.AUTOSETTER_LOCAL_TOKEN || !process.env.MAILGUN_API_KEY) throw new Error('Demo configuration incomplete');
+if (!token || !process.env.AUTOSETTER_LOCAL_TOKEN || !process.env.MAILGUN_API_KEY || !process.env.GOOGLE_PLACES_API_KEY) throw new Error('Demo configuration incomplete');
 const root = process.cwd(), output = path.join(process.env.AUTOSETTER_DATA_DIR, 'demo-downloads');
 await fs.mkdir(output, { recursive: true });
 const internal = 'http://127.0.0.1:3202';
@@ -93,7 +93,14 @@ const server = createServer(async (req, res) => {
   } catch { json(res, 400, { error: 'Invalid request' }); }
 });
 server.listen(3201, '127.0.0.1');
+let keyConfigured = false;
 const setup = setInterval(async () => {
-  try { const state = await local('/api/settings/model/setup', { method: 'POST' }).then(r => r.json()); if (state.status === 'ready') clearInterval(setup); } catch { /* Wait for the internal Next server. */ }
+  try {
+    if (!keyConfigured) {
+      const configured = await local('/api/settings/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: process.env.GOOGLE_PLACES_API_KEY }) });
+      if (!configured.ok) return;
+      keyConfigured = true;
+    }
+    const state = await local('/api/settings/model/setup', { method: 'POST' }).then(r => r.json()); if (state.status === 'ready') clearInterval(setup); } catch { /* Wait for the internal Next server. */ }
 }, 10_000);
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { server.close(); child.kill(signal); setTimeout(() => process.exit(0), 3000).unref(); });
